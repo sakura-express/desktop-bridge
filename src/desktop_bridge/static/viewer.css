@@ -1,0 +1,11 @@
+.oauth-viewer{height:100dvh;display:flex;flex-direction:column;overflow:hidden}
+.oauth-viewer .viewer-toolbar{height:auto;min-height:48px;flex-shrink:0;padding:10px 12px;gap:10px;flex-wrap:wrap}
+.viewer-title{display:flex;align-items:center;gap:10px;min-width:0;font-size:12px}
+.viewer-title span,.viewer-actions>span{font-size:12px;color:var(--muted)}
+.viewer-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.viewer-actions button{font-size:12px;padding:6px 10px;background:#d6eac8}
+#viewer-screen-shell{position:relative;flex:1;min-height:0;background:#101712;overflow:hidden;display:flex}
+#viewer-screen{flex:1;min-width:0;min-height:0;overflow:hidden}
+#viewer-message{position:absolute;inset:0;margin:0;padding:24px;display:flex;align-items:center;justify-content:center;text-align:center;color:#c8d6c9;background:#101712;font-size:12px;line-height:1.7}
+.oauth-viewer .viewer-footer{flex-shrink:0;padding:8px 12px;font-size:11px;line-height:1.5}
+@media(max-width:600px){.viewer-toolbar{align-items:flex-start}.viewer-actions{width:100%}.viewer-actions>span{flex:1}.oauth-viewer .viewer-footer{font-size:10px}}

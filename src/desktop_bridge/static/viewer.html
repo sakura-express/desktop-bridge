@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f5f5f0">
+  <title>Agent Computer · Read-only desktop</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/viewer.css">
+</head>
+<body class="oauth-viewer">
+  <header class="viewer-toolbar">
+    <div class="viewer-title"><strong>Agent Computer</strong><span>Read-only desktop</span></div>
+    <div class="viewer-actions">
+      <span id="viewer-status" role="status">Connecting…</span>
+      <button id="viewer-reconnect" type="button">Reconnect</button>
+      <button id="viewer-fullscreen" type="button">Full screen</button>
+    </div>
+  </header>
+  <main id="viewer-screen-shell">
+    <div id="viewer-screen" aria-label="Read-only remote desktop"></div>
+    <p id="viewer-message" role="status">Connecting to your desktop…</p>
+  </main>
+  <footer class="viewer-footer">OAuth-authorized, server-enforced read-only access. Private takeover hides this desktop. Control remains with the owner.</footer>
+  <script type="module" src="/static/viewer.js"></script>
+</body>
+</html>

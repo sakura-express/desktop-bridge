@@ -10,7 +10,7 @@ File editing, shell commands, and code execution are powered by **[Coding Tools 
 
 **Early preview · One trusted owner · Apache-2.0**
 
-[GitHub Actions preview / 限时体验](docs/actions-preview.zh-CN.md) · [English quickstart](docs/quickstart.md) · [简体中文上手](docs/quickstart.zh-CN.md) · [Deployment](docs/deployment.md) · [Contributing](CONTRIBUTING.md) · [Roadmap](ROADMAP.md) · [Changelog](CHANGELOG.md)
+[OAuth desktop viewer / OAuth 直连桌面](docs/oauth-desktop.md) · [GitHub Actions preview / 限时体验](docs/actions-preview.zh-CN.md) · [English quickstart](docs/quickstart.md) · [简体中文上手](docs/quickstart.zh-CN.md) · [Deployment](docs/deployment.md) · [Contributing](CONTRIBUTING.md) · [Roadmap](ROADMAP.md) · [Changelog](CHANGELOG.md)
 
 ![Agent Computer desktop and workspace with sample data](docs/media/agent-computer-social-preview.png)
 

@@ -31,6 +31,9 @@ class Auth:
         self.codes = {}
         self.tokens = {}
         self.sessions = {}
+        # OAuth viewers never share the owner's cookie or CSRF authority.
+        self.viewer_tickets = {}
+        self.viewer_sessions = {}
         self.attempts = {}
 
     def throttle(self, key: str):
@@ -64,10 +67,54 @@ class Auth:
         # Owner bootstrap token intentionally cannot be used as an MCP token.
         return self.tokens.get(digest(token), 0) > time.time()
 
+    def viewer_ticket(self, token: str):
+        now = time.time()
+        grant = digest(token)
+        expires = self.tokens.get(grant, 0)
+        if expires <= now:
+            raise BridgeError("UNAUTHORIZED", "A valid OAuth access token is required")
+        self.viewer_tickets = {
+            k: v for k, v in self.viewer_tickets.items()
+            if v[1] > now and self.tokens.get(v[0], 0) > now
+        }
+        if len(self.viewer_tickets) >= 128:
+            raise BridgeError("RATE_LIMITED", "Too many pending desktop connections")
+        ticket = secrets.token_urlsafe(32)
+        deadline = min(now + 60, expires)
+        self.viewer_tickets[digest(ticket)] = (grant, deadline)
+        return ticket, deadline
+
+    def redeem_viewer_ticket(self, ticket: str):
+        if not isinstance(ticket, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", ticket):
+            raise BridgeError("UNAUTHORIZED", "Invalid or expired desktop ticket")
+        item = self.viewer_tickets.pop(digest(ticket), None)
+        now = time.time()
+        if not item or item[1] <= now or self.tokens.get(item[0], 0) <= now:
+            raise BridgeError("UNAUTHORIZED", "Invalid or expired desktop ticket")
+        self.viewer_sessions = {
+            k: v for k, v in self.viewer_sessions.items()
+            if v[1] > now and self.tokens.get(v[0], 0) > now
+        }
+        if len(self.viewer_sessions) >= 128:
+            raise BridgeError("RATE_LIMITED", "Too many desktop viewer sessions")
+        sid = secrets.token_urlsafe(32)
+        expires = self.tokens[item[0]]
+        self.viewer_sessions[digest(sid)] = (item[0], expires)
+        return sid, expires
+
+    def viewer_session(self, sid: str | None):
+        item = self.viewer_sessions.get(digest(sid or ""))
+        now = time.time()
+        if item and item[1] > now and self.tokens.get(item[0], 0) > now:
+            return item
+        return None
+
     def revoke(self):
         self.tokens.clear()
         self.codes.clear()
         self.sessions.clear()
+        self.viewer_tickets.clear()
+        self.viewer_sessions.clear()
 
     def register(self, data):
         if not isinstance(data, dict):
