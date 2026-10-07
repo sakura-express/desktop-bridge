@@ -25,7 +25,7 @@ jobs:
       - run: ruff check .
       - run: pytest -q
       - name: Viewer asynchronous state regressions
-        run: node --test tests/viewer_state.test.cjs
+        run: node --test tests/viewer_state.test.cjs tests/oauth_viewer.test.cjs
   desktop-e2e:
     strategy:
       fail-fast: false

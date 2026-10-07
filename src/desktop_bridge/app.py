@@ -535,6 +535,66 @@ def create_app(
     async def home():
         return HTMLResponse((STATIC / "index.html").read_text())
 
+    @app.get("/viewer")
+    async def viewer_page():
+        return HTMLResponse((STATIC / "viewer.html").read_text())
+
+    def viewer_available():
+        if runtime.session.mode == "private":
+            raise BridgeError("PRIVATE_TAKEOVER", "Desktop observation is paused")
+
+    @app.post("/api/viewer/ticket")
+    async def viewer_ticket(request: Request):
+        header = request.headers.get("authorization", "")
+        scheme, _, credential = header.partition(" ")
+        if scheme.lower() != "bearer" or not credential or not auth.bearer(credential):
+            return JSONResponse(
+                {"error": "unauthorized", "message": "A valid OAuth access token is required"},
+                status_code=401,
+                headers={"WWW-Authenticate": 'Bearer scope="computer"'},
+            )
+        viewer_available()
+        ticket, expires = auth.viewer_ticket(credential)
+        return {
+            "viewer_url": base_url + "/viewer#ticket=" + ticket,
+            "ticket_expires_in": max(0, int(expires - time.time())),
+            "read_only": True,
+        }
+
+    @app.post("/api/viewer/session")
+    async def viewer_login(request: Request):
+        # A foreign page cannot replace the viewer's identity with its own grant.
+        if request.headers.get("origin") != base_url:
+            raise BridgeError("UNAUTHORIZED", "Origin mismatch")
+        if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
+            raise BridgeError("UNAUTHORIZED", "JSON desktop ticket required")
+        try:
+            body = await request.json()
+        except ValueError:
+            raise BridgeError("UNAUTHORIZED", "Invalid desktop ticket") from None
+        viewer_available()
+        ticket = body.get("ticket") if isinstance(body, dict) else None
+        sid, expires = auth.redeem_viewer_ticket(ticket)
+        response = JSONResponse({"read_only": True, "expires_at": expires})
+        response.set_cookie(
+            "bridge_viewer_session", sid, httponly=True,
+            secure=base_url.startswith("https:"), samesite="strict",
+            max_age=max(0, int(expires - time.time())), path="/",
+        )
+        return response
+
+    @app.get("/api/viewer/status")
+    async def viewer_status(request: Request):
+        grant = auth.viewer_session(request.cookies.get("bridge_viewer_session"))
+        if not grant:
+            raise BridgeError("UNAUTHORIZED", "Desktop authorization expired; reconnect from your client")
+        viewer_available()
+        return {
+            "state": runtime.session.mode.upper(), "read_only": True,
+            "expires_at": grant[1], "ready": runtime.ready,
+            "resolution": {"width": 1280, "height": 800},
+        }
+
     @app.post("/api/login")
     async def login(request: Request):
         auth.throttle("login:" + (request.client.host if request.client else "unknown"))
@@ -670,6 +730,11 @@ def create_app(
             "authorization_servers": [base_url],
             "scopes_supported": ["computer"],
             "bearer_methods_supported": ["header"],
+            "desktop_viewer": {
+                "ticket_endpoint": base_url + "/api/viewer/ticket",
+                "viewer_url": base_url + "/viewer",
+                "read_only": True,
+            },
         }
 
     @app.get("/.well-known/oauth-authorization-server")
@@ -706,7 +771,7 @@ def create_app(
         )
         csrf = auth.session(request.cookies.get("bridge_session"))[0]
         return HTMLResponse(
-            f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><link rel="stylesheet" href="/static/style.css"><title>Approve computer access</title></head><body><main class="approval"><h1>Connect {html.escape(client["client_name"])}?</h1><p>This client can view and operate your desktop, browser, files, and shell. Approve only your trusted AI client.</p><p>Callback: <strong>{html.escape(params["redirect_uri"])}</strong></p><form method="post" action="/authorize">{fields}<input type="hidden" name="csrf" value="{csrf}"><button type="submit">Approve for one hour</button> <a href="/">Cancel</a></form></main></body></html>'''
+            f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><link rel="stylesheet" href="/static/style.css"><title>Approve computer access</title></head><body><main class="approval"><h1>Connect {html.escape(client["client_name"])}?</h1><p>This client can view and operate your desktop, browser, files, and shell. It can also open an OAuth-authorized read-only desktop viewer without another owner login. Viewer access cannot take over control or observe private takeover. Approve only your trusted AI client.</p><p>Callback: <strong>{html.escape(params["redirect_uri"])}</strong></p><form method="post" action="/authorize">{fields}<input type="hidden" name="csrf" value="{csrf}"><button type="submit">Approve for one hour</button> <a href="/">Cancel</a></form></main></body></html>'''
         )
 
     @app.post("/authorize")
@@ -727,15 +792,30 @@ def create_app(
         auth.throttle("token")
         return auth.exchange(dict(await request.form()))
 
+    @app.websocket("/desktop/oauth/view")
+    async def oauth_desktop_socket(websocket: WebSocket):
+        await desktop_socket(websocket, "oauth-view")
+
     @app.websocket("/desktop/{mode}")
     async def desktop_socket(websocket: WebSocket, mode: str):
-        sid = websocket.cookies.get("bridge_session")
+        oauth_viewer = mode == "oauth-view"
+        sid = websocket.cookies.get("bridge_viewer_session" if oauth_viewer else "bridge_session")
         origin = websocket.headers.get("origin")
         session = runtime.session
+
+        def authorized():
+            if oauth_viewer:
+                return bool(auth.viewer_session(sid)) and session.mode != "private"
+            return bool(auth.session(sid))
+
+        # oauth-view is internal only; the public /desktop/{mode} route must not
+        # provide an alias that can accidentally bypass future route policies.
         if (
-            not auth.session(sid)
+            not authorized()
             or origin != base_url
-            or mode not in {"view", "control"}
+            or (mode not in {"view", "control"} and not (
+                oauth_viewer and websocket.url.path == "/desktop/oauth/view"
+            ))
             or (
                 mode == "control"
                 and (
@@ -764,7 +844,7 @@ def create_app(
             async def upstream():
                 while True:
                     packet = await websocket.receive_bytes()
-                    if not auth.session(sid) or (
+                    if not authorized() or (
                         mode == "control"
                         and (session.epoch != epoch or session.mode not in {"human", "private"})
                     ):
@@ -779,11 +859,27 @@ def create_app(
             async def downstream():
                 while True:
                     packet = await reader.read(65536)
-                    if not packet or not auth.session(sid):
+                    if not packet or not authorized():
                         return
                     await websocket.send_bytes(packet)
 
-            tasks = [asyncio.create_task(upstream()), asyncio.create_task(downstream())]
+            async def authorization_watchdog():
+                # Expiry/revocation can occur without any socket traffic. Wake
+                # periodically, but cancel the timer when the socket is closed.
+                tick = asyncio.Event()
+                loop = asyncio.get_running_loop()
+                while authorized():
+                    wakeup = loop.call_later(0.5, tick.set)
+                    try:
+                        await tick.wait()
+                    finally:
+                        wakeup.cancel()
+                    tick.clear()
+
+            tasks = [
+                asyncio.create_task(upstream()), asyncio.create_task(downstream()),
+                asyncio.create_task(authorization_watchdog()),
+            ]
             try:
                 await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             finally:
