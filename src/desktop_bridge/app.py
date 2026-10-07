@@ -864,9 +864,17 @@ def create_app(
                     await websocket.send_bytes(packet)
 
             async def authorization_watchdog():
-                # Close even an idle connection when its grant expires/revokes.
+                # Expiry/revocation can occur without any socket traffic. Wake
+                # periodically, but cancel the timer when the socket is closed.
+                tick = asyncio.Event()
+                loop = asyncio.get_running_loop()
                 while authorized():
-                    await asyncio.sleep(0.5)
+                    wakeup = loop.call_later(0.5, tick.set)
+                    try:
+                        await tick.wait()
+                    finally:
+                        wakeup.cancel()
+                    tick.clear()
 
             tasks = [
                 asyncio.create_task(upstream()), asyncio.create_task(downstream()),
