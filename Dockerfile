@@ -1,13 +1,14 @@
 FROM python:3.12-slim-bookworm AS desktop
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 DISPLAY=:99 HOME=/home/bridge LANG=C.UTF-8
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential linux-libc-dev chromium xvfb x11vnc openbox xclip novnc supervisor tini fonts-noto-cjk \
+    build-essential linux-libc-dev chromium xvfb x11vnc xclip novnc supervisor tini fonts-noto-cjk \
+    xfce4-session xfwm4 xfce4-panel xfdesktop4 thunar xfce4-settings dbus-x11 x11-utils \
     fonts-dejavu-core xterm curl ca-certificates git ripgrep fd-find nodejs npm \
     && rm -rf /var/lib/apt/lists/* \
     && ln -s /usr/bin/fdfind /usr/local/bin/fd \
     && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix \
     && useradd --create-home --uid 1000 bridge \
-    && mkdir -p /data/workspace /data/state /data/profile /home/bridge/.config/openbox \
+    && mkdir -p /data/workspace /data/state /data/profile /home/bridge/Desktop \
     && chown -R bridge:bridge /data /home/bridge
 WORKDIR /app
 COPY pyproject.toml README.md constraints.txt ./
@@ -16,7 +17,13 @@ ARG BRIDGE_PYTHON_EXTRAS=desktop
 RUN pip install --no-cache-dir -c constraints.txt ".[${BRIDGE_PYTHON_EXTRAS}]"
 COPY docker/supervisord.conf /etc/supervisor/supervisord.conf
 COPY docker/start-browser.sh /usr/local/bin/start-browser
-RUN chmod +x /usr/local/bin/start-browser
+COPY docker/start-desktop.sh /usr/local/bin/start-desktop
+COPY --chown=bridge:bridge docker/desktop/ /home/bridge/Desktop/
+COPY --chown=bridge:bridge docker/xfce4/ /home/bridge/.config/xfce4/
+# Menu and desktop launches use the same CDP-enabled browser as supervisor.
+COPY docker/desktop/chromium.desktop /usr/share/applications/chromium.desktop
+RUN chmod +x /usr/local/bin/start-browser /usr/local/bin/start-desktop \
+    /home/bridge/Desktop/*.desktop
 USER bridge
 EXPOSE 8080
 VOLUME ["/data"]

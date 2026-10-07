@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Workspace Files
+Name[zh_CN]=工作区文件
+Exec=thunar /data/workspace
+Icon=system-file-manager
+Terminal=false
+Categories=System;FileManager;
+StartupNotify=true
