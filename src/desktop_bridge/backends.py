@@ -10,8 +10,36 @@ from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from urllib.parse import urlsplit, urlunsplit
 
 from .state import BridgeError
+
+
+def _safe_url(url: str | None) -> str | None:
+    if not url:
+        return url
+    try:
+        parts = urlsplit(url)
+        if parts.username or parts.password:
+            netloc = parts.hostname or ""
+            if parts.port:
+                netloc += f":{parts.port}"
+            return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+        return url
+    except Exception:
+        return url
+
+
+def _extract_redirect_chain(response) -> list[str]:
+    if not response or not hasattr(response, "request"):
+        return []
+    chain = []
+    req = getattr(response.request, "redirected_from", None)
+    while req:
+        chain.append(_safe_url(getattr(req, "url", "")) or "")
+        req = getattr(req, "redirected_from", None)
+    chain.reverse()
+    return chain
 
 
 class Desktop:
@@ -215,10 +243,26 @@ class Browser:
         if state["tab_id"] is None:
             return {**state, "url": "", "title": "", "snapshot": ""}
         page = self._tabs[state["tab_id"]]
+        try:
+            async with asyncio.timeout(10):
+                title = await page.title()
+                aria = (await page.locator("body").aria_snapshot())[:40000]
+        except TimeoutError:
+            raise BridgeError(
+                "BROWSER_OBSERVATION_TIMEOUT",
+                "Timed out reading browser tab title/snapshot within 10s; take a fresh snapshot",
+            )
+        except Exception as e:
+            if isinstance(e, asyncio.CancelledError):
+                raise
+            raise BridgeError(
+                "BROWSER_OBSERVATION_FAILED",
+                f"Failed reading browser snapshot: {e}",
+            )
         value = {
             "url": page.url,
-            "title": await page.title(),
-            "snapshot": (await page.locator("body").aria_snapshot())[:40000],
+            "title": title,
+            "snapshot": aria,
         }
         current = await self.tab_state()
         if current["tab_id"] != state["tab_id"]:
@@ -227,6 +271,8 @@ class Browser:
 
     async def perform(self, action, *, observation, guard):
         kind = action["kind"]
+        requested_url = action.get("url")
+        response = None
         if kind == "select_tab":
             self._live_tabs()
             target = action["tab_id"]
@@ -250,13 +296,57 @@ class Browser:
             self._live_tabs()
             guard()
             await page.bring_to_front()
-            guard()
-            await page.goto(action["url"], wait_until="domcontentloaded", timeout=20000)
+            try:
+                guard()
+                response = await page.goto(requested_url, wait_until="domcontentloaded", timeout=20000)
+            except asyncio.CancelledError:
+                raise
+            except TimeoutError:
+                raise BridgeError(
+                    "NAVIGATION_TIMEOUT",
+                    f"Navigation timed out after 20s for {_safe_url(requested_url)}. "
+                    f"Current URL: {_safe_url(page.url)}. Page may have navigated; take a fresh snapshot.",
+                )
+            except Exception as e:
+                error_name = type(e).__name__
+                if "timeout" in error_name.lower():
+                    raise BridgeError(
+                        "NAVIGATION_TIMEOUT",
+                        f"Navigation timed out for {_safe_url(requested_url)}. "
+                        f"Current URL: {_safe_url(page.url)}. Page may have navigated; take a fresh snapshot.",
+                    )
+                raise BridgeError(
+                    "NAVIGATION_FAILED",
+                    f"Navigation failed for {_safe_url(requested_url)}: {e}. "
+                    f"Current URL: {_safe_url(page.url)}. Page may have navigated; take a fresh snapshot.",
+                )
         else:
             page = await self.page(observation.browser_tab_id)
             if kind == "navigate":
-                guard()
-                await page.goto(action["url"], wait_until="domcontentloaded", timeout=20000)
+                try:
+                    guard()
+                    response = await page.goto(requested_url, wait_until="domcontentloaded", timeout=20000)
+                except asyncio.CancelledError:
+                    raise
+                except TimeoutError:
+                    raise BridgeError(
+                        "NAVIGATION_TIMEOUT",
+                        f"Navigation timed out after 20s for {_safe_url(requested_url)}. "
+                        f"Current URL: {_safe_url(page.url)}. Page may have navigated; take a fresh snapshot.",
+                    )
+                except Exception as e:
+                    error_name = type(e).__name__
+                    if "timeout" in error_name.lower():
+                        raise BridgeError(
+                            "NAVIGATION_TIMEOUT",
+                            f"Navigation timed out for {_safe_url(requested_url)}. "
+                            f"Current URL: {_safe_url(page.url)}. Page may have navigated; take a fresh snapshot.",
+                        )
+                    raise BridgeError(
+                        "NAVIGATION_FAILED",
+                        f"Navigation failed for {_safe_url(requested_url)}: {e}. "
+                        f"Current URL: {_safe_url(page.url)}. Page may have navigated; take a fresh snapshot.",
+                    )
             else:
                 locator = page.get_by_role(action["role"], name=action["name"], exact=True)
                 if await locator.count() != 1:
@@ -272,8 +362,23 @@ class Browser:
         # This is the tab acted on, even if the action opened a popup. A fresh
         # snapshot determines what is visible next; never silently retarget.
         self._live_tabs()
-        return {"ok": True, "url": page.url,
-                "tab_id": next((key for key, value in self._tabs.items() if value is page), None)}
+        tab_id = next((key for key, value in self._tabs.items() if value is page), None)
+        if kind in {"navigate", "new_tab"}:
+            http_status = getattr(response, "status", None) if response else None
+            redirect_chain = _extract_redirect_chain(response)
+            is_http_err = http_status is not None and http_status >= 400
+            res = {
+                "ok": not is_http_err,
+                "requested_url": _safe_url(requested_url),
+                "url": page.url,
+                "http_status": http_status,
+                "redirects": redirect_chain,
+                "tab_id": tab_id,
+            }
+            if is_http_err:
+                res["error"] = f"HTTP {http_status}"
+            return res
+        return {"ok": True, "url": page.url, "tab_id": tab_id}
 
     async def close(self):
         if self.pw:

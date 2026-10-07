@@ -70,7 +70,7 @@ def main():
             ["gio", "launch", f"/home/bridge/Desktop/{launcher}"], check=True,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        wait_for(f"visible {wm_class}", lambda: wm_class in visible_classes())
+        wait_for(f"visible {wm_class}", lambda wm_class=wm_class: wm_class in visible_classes())
     print("PASS: workspace and terminal launchers open real windows", flush=True)
     # Use the actual .desktop Exec entry, not an unrelated browser command.
     subprocess.run(

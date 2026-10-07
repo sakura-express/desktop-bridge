@@ -178,7 +178,10 @@ class Runtime:
                 "browser_action",
                 "Use exact accessible role/name from a fresh observation of the active tab. "
                 "navigate stays in that tab; new_tab opens a URL; select_tab brings a listed tab_id to the front. "
-                "Tab changes invalidate page actions based on older observations.",
+                "Recovery steps: each action advances the epoch and invalidates prior observation_id, "
+                "so take a fresh browser_snapshot after every action. "
+                "Use a brand-new unique action_id (1-128 chars) for every new action; repeating an action_id with identical "
+                "parameters returns cached result, while differing parameters causes IDEMPOTENCY_CONFLICT.",
                 {
                     "action": BrowserAction.model_json_schema(),
                     "observation_id": {"type": "string"},
