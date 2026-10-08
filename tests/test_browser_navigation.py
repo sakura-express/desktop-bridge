@@ -1,8 +1,9 @@
 import asyncio
 import tempfile
 from pathlib import Path
-from desktop_bridge.backends import Browser, _safe_url, _extract_redirect_chain
-from desktop_bridge.state import Session, BridgeError, Observation
+
+from desktop_bridge.backends import Browser, _extract_redirect_chain, _safe_url
+from desktop_bridge.state import BridgeError, Observation, Session
 
 
 def test_safe_url_strips_credentials():
@@ -48,7 +49,7 @@ async def test_session_idempotency_and_stale_recovery():
         try:
             async with s.action("act-unique-1", {"action": "different"}) as ticket:
                 pass
-            assert False, "Should raise IDEMPOTENCY_CONFLICT"
+            raise AssertionError("Should raise IDEMPOTENCY_CONFLICT")
         except BridgeError as e:
             assert e.code == "IDEMPOTENCY_CONFLICT"
             assert "Recovery:" in str(e)
@@ -62,7 +63,7 @@ async def test_session_idempotency_and_stale_recovery():
         try:
             async with s.action("act-unique-3", {"action": "step2"}, observation_id=obs_id) as ticket:
                 pass
-            assert False, "Should raise STALE_OBSERVATION"
+            raise AssertionError("Should raise STALE_OBSERVATION")
         except BridgeError as e:
             assert e.code == "STALE_OBSERVATION"
             assert "Recovery:" in str(e)
@@ -86,7 +87,8 @@ async def test_browser_perform_and_snapshot_simulation():
             return FakeLocator()
         async def title(self):
             return "Page Title"
-        async def goto(self, url, wait_until=None, timeout=None):
+        # Test double mimicking Playwright Page.goto timeout parameter
+        async def goto(self, url, wait_until=None, timeout=None):  # noqa: ASYNC109
             if "timeout" in url:
                 raise TimeoutError("Simulated timeout")
             if "fail" in url:
@@ -122,7 +124,7 @@ async def test_browser_perform_and_snapshot_simulation():
     b._tabs = {"tab-1": FakePage("https://timeout.com", 200)}
     try:
         await b.perform({"kind": "navigate", "url": "https://timeout.com"}, observation=obs, guard=lambda: None)
-        assert False, "Should raise NAVIGATION_TIMEOUT"
+        raise AssertionError("Should raise NAVIGATION_TIMEOUT")
     except BridgeError as e:
         assert e.code == "NAVIGATION_TIMEOUT"
         assert "Page may have navigated" in str(e)
@@ -131,7 +133,7 @@ async def test_browser_perform_and_snapshot_simulation():
     b._tabs = {"tab-1": FakePage("https://fail.com", 200)}
     try:
         await b.perform({"kind": "navigate", "url": "https://fail.com"}, observation=obs, guard=lambda: None)
-        assert False, "Should raise NAVIGATION_FAILED"
+        raise AssertionError("Should raise NAVIGATION_FAILED")
     except BridgeError as e:
         assert e.code == "NAVIGATION_FAILED"
 

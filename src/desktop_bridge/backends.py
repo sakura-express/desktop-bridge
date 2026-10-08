@@ -7,10 +7,10 @@ import base64
 import os
 from contextlib import AsyncExitStack
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from urllib.parse import urlsplit, urlunsplit
 
 from .state import BridgeError
 
@@ -247,18 +247,18 @@ class Browser:
             async with asyncio.timeout(10):
                 title = await page.title()
                 aria = (await page.locator("body").aria_snapshot())[:40000]
-        except TimeoutError:
+        except TimeoutError as e:
             raise BridgeError(
                 "BROWSER_OBSERVATION_TIMEOUT",
                 "Timed out reading browser tab title/snapshot within 10s; take a fresh snapshot",
-            )
+            ) from e
         except Exception as e:
             if isinstance(e, asyncio.CancelledError):
                 raise
             raise BridgeError(
                 "BROWSER_OBSERVATION_FAILED",
                 f"Failed reading browser snapshot: {e}",
-            )
+            ) from e
         value = {
             "url": page.url,
             "title": title,
@@ -301,12 +301,12 @@ class Browser:
                 response = await page.goto(requested_url, wait_until="domcontentloaded", timeout=20000)
             except asyncio.CancelledError:
                 raise
-            except TimeoutError:
+            except TimeoutError as e:
                 raise BridgeError(
                     "NAVIGATION_TIMEOUT",
                     f"Navigation timed out after 20s for {_safe_url(requested_url)}. "
                     f"Current URL: {_safe_url(page.url)}. Page may have navigated; take a fresh snapshot.",
-                )
+                ) from e
             except Exception as e:
                 error_name = type(e).__name__
                 if "timeout" in error_name.lower():
@@ -314,12 +314,12 @@ class Browser:
                         "NAVIGATION_TIMEOUT",
                         f"Navigation timed out for {_safe_url(requested_url)}. "
                         f"Current URL: {_safe_url(page.url)}. Page may have navigated; take a fresh snapshot.",
-                    )
+                    ) from e
                 raise BridgeError(
                     "NAVIGATION_FAILED",
                     f"Navigation failed for {_safe_url(requested_url)}: {e}. "
                     f"Current URL: {_safe_url(page.url)}. Page may have navigated; take a fresh snapshot.",
-                )
+                ) from e
         else:
             page = await self.page(observation.browser_tab_id)
             if kind == "navigate":
@@ -328,12 +328,12 @@ class Browser:
                     response = await page.goto(requested_url, wait_until="domcontentloaded", timeout=20000)
                 except asyncio.CancelledError:
                     raise
-                except TimeoutError:
+                except TimeoutError as e:
                     raise BridgeError(
                         "NAVIGATION_TIMEOUT",
                         f"Navigation timed out after 20s for {_safe_url(requested_url)}. "
                         f"Current URL: {_safe_url(page.url)}. Page may have navigated; take a fresh snapshot.",
-                    )
+                    ) from e
                 except Exception as e:
                     error_name = type(e).__name__
                     if "timeout" in error_name.lower():
@@ -341,12 +341,12 @@ class Browser:
                             "NAVIGATION_TIMEOUT",
                             f"Navigation timed out for {_safe_url(requested_url)}. "
                             f"Current URL: {_safe_url(page.url)}. Page may have navigated; take a fresh snapshot.",
-                        )
+                        ) from e
                     raise BridgeError(
                         "NAVIGATION_FAILED",
                         f"Navigation failed for {_safe_url(requested_url)}: {e}. "
                         f"Current URL: {_safe_url(page.url)}. Page may have navigated; take a fresh snapshot.",
-                    )
+                    ) from e
             else:
                 locator = page.get_by_role(action["role"], name=action["name"], exact=True)
                 if await locator.count() != 1:
