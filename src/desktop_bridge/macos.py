@@ -27,6 +27,7 @@ KEYS.update(dict(zip([f"f{i}" for i in range(1, 13)],
 
 class MacDesktop:
     transport = "native"
+    platform = "macos"
 
     def __init__(self):
         if sys.platform != "darwin":

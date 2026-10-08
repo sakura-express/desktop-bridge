@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
     inputs:
       runner:
-        description: 'Desktop OS: Linux Docker or experimental native macOS'
+        description: 'Desktop OS: Linux Docker or experimental native macOS / Windows'
         type: choice
-        options: [ubuntu-latest, macos-26, macos-15-intel]
+        options: [ubuntu-latest, macos-26, macos-15-intel, windows-2025, windows-2022]
         default: ubuntu-latest
       mode:
         description: 'preview: interactive development session; verify: short tunnel smoke test'
@@ -28,7 +28,7 @@ on:
         default: ''
   push:
     branches: [main]
-    paths: ['.github/workflows/preview.yml', 'scripts/preview.py', 'scripts/tunnel_smoke.py', 'scripts/desktop_smoke.py', 'scripts/macos_probe.py', 'src/desktop_bridge/macos.py', 'Dockerfile', 'docker/**']
+    paths: ['.github/workflows/preview.yml', 'scripts/preview.py', 'scripts/tunnel_smoke.py', 'scripts/desktop_smoke.py', 'scripts/macos_probe.py', 'src/desktop_bridge/macos.py', 'src/desktop_bridge/windows.py', 'src/desktop_bridge/windows_files.py', 'Dockerfile', 'docker/**']
 permissions:
   contents: read
 concurrency:
@@ -43,7 +43,7 @@ jobs:
       TUNNEL_KIND: ${{ github.event_name == 'push' && 'quick' || inputs.tunnel }}
       PREVIEW_MINUTES: ${{ inputs.minutes || '60' }}
       PREVIEW_PUBLIC_URL: ${{ inputs.public_url }}
-      PREVIEW_PLATFORM: ${{ startsWith(inputs.runner, 'macos-') && 'macos' || 'linux' }}
+      PREVIEW_PLATFORM: ${{ startsWith(inputs.runner, 'macos-') && 'macos' || startsWith(inputs.runner, 'windows-') && 'windows' || 'linux' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -85,6 +85,26 @@ jobs:
         run: |
           python -m pytest tests/test_macos_probe.py tests/test_macos_backend.py tests/test_preview.py tests/test_app.py tests/test_oauth_viewer.py -q
           python scripts/macos_probe.py --output macos-probe-artifacts
+      - name: Install pinned native Windows service and tunnel client
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $clientPath = Join-Path $env:RUNNER_TEMP 'cloudflared.exe'
+          Invoke-WebRequest -Uri 'https://github.com/cloudflare/cloudflared/releases/download/2026.9.3/cloudflared-windows-amd64.exe' -OutFile $clientPath
+          $expectedDigest = 'f096265ec2fcbe9bb6e2d64268db167ced3fcbb83d894bdb9e2fcdb26f2ea7e2'
+          if ((Get-FileHash -LiteralPath $clientPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedDigest) {
+            throw 'cloudflared SHA-256 mismatch'
+          }
+          python -m pip install -c constraints.txt -e '.[windows,test]' 'websockets==17.2'
+          if ($LASTEXITCODE -ne 0) { throw 'Windows dependencies failed to install' }
+      - name: Verify Windows adapters, context IO and desktop availability
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m pytest tests/test_windows_backend.py tests/test_windows_files.py tests/test_preview.py tests/test_app.py tests/test_oauth_viewer.py tests/test_personal.py tests/test_plugins.py -q
+          if ($LASTEXITCODE -ne 0) { throw 'Windows regression tests failed' }
+          python scripts/windows_probe.py --output windows-probe-artifacts
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop unavailable; inspect preflight report' }
       - name: Build desktop
         if: runner.os == 'Linux'
         run: docker build -t desktop-bridge:preview .
@@ -114,5 +134,13 @@ jobs:
         with:
           name: macos-preview-preflight-${{ inputs.runner }}-${{ github.run_id }}
           path: macos-probe-artifacts/
+          retention-days: 3
+          if-no-files-found: warn
+      - name: Upload Windows preflight evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always() && runner.os == 'Windows'
+        with:
+          name: windows-preview-preflight-${{ inputs.runner }}-${{ github.run_id }}
+          path: windows-probe-artifacts/
           retention-days: 3
           if-no-files-found: warn

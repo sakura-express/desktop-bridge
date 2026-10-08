@@ -5,6 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
+if os.name != "posix":
+    pytest.skip("Linux Fly entrypoint uses POSIX users and permissions", allow_module_level=True)
+
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("fly_entrypoint", ROOT / "docker/fly-entrypoint.py")
 entrypoint = importlib.util.module_from_spec(spec)

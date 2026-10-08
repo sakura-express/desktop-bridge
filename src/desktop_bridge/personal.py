@@ -6,7 +6,6 @@ protects cooperating store instances. Container shell access remains trusted.
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import stat
@@ -37,7 +36,7 @@ class Profile(PersonalModel):
 def relative_artifact(path: str) -> str:
     parts = PurePosixPath(path).parts
     if (
-        not path or len(path) > 500 or "\\" in path or "\x00" in path
+        not path or len(path) > 500 or "\\" in path or "\x00" in path or ":" in path
         or path.startswith("/") or any(p in {".", ".."} for p in path.split("/"))
         or not parts or parts[0] == "personal" or "//" in path
     ):
@@ -106,6 +105,14 @@ class PersonalStore:
     @contextmanager
     def locked(self, *, create=False):
         """Fixed dir-relative filenames and O_NOFOLLOW reject redirected state."""
+        if os.name == "nt":
+            from .windows_files import locked_directory
+
+            with locked_directory(self.workspace, self.directory, create=create) as directory:
+                yield directory
+            return
+        import fcntl
+
         directory_fd = lock_fd = None
         try:
             if not self.directory.exists() and not self.directory.is_symlink():
@@ -134,7 +141,13 @@ class PersonalStore:
         if directory_fd is None:
             return Context()
         try:
-            fd = os.open("context.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+            if os.name == "nt":
+                from .windows_files import open_file
+
+                fd = open_file(directory_fd / "context.json")
+            else:
+                fd = os.open("context.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                             dir_fd=directory_fd)
         except FileNotFoundError:
             return Context()
         with os.fdopen(fd, "rb") as source:
@@ -157,9 +170,11 @@ class PersonalStore:
         relative_artifact(path)
         target = self.workspace / path
         # References never serve directories, symlinks, or files outside the workspace.
-        safe = all(not part.is_symlink() for part in [target, *target.parents]
-                   if part != self.workspace and part.is_relative_to(self.workspace))
         try:
+            safe = all(not part.is_symlink() and not (
+                part.exists() and getattr(part.lstat(), "st_file_attributes", 0) & 0x400
+            ) for part in [target, *target.parents]
+                if part != self.workspace and part.is_relative_to(self.workspace))
             available = safe and target.is_file() and target.resolve().is_relative_to(self.workspace)
             size = target.stat().st_size if available else None
         except OSError:
@@ -210,24 +225,38 @@ class PersonalStore:
             encoded = (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode()
             # Refuse to replace a symlink even though replace would only unlink it.
             try:
-                info = os.stat("context.json", dir_fd=directory_fd, follow_symlinks=False)
-                if not stat.S_ISREG(info.st_mode):
+                info = (os.stat(directory_fd / "context.json", follow_symlinks=False)
+                        if os.name == "nt" else
+                        os.stat("context.json", dir_fd=directory_fd, follow_symlinks=False))
+                if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
                     raise BridgeError("UNSAFE_CONTEXT_PATH", "Personal context must be a regular file")
             except FileNotFoundError:
                 pass
             temp = f".context-{uuid.uuid4().hex}.tmp"
             try:
-                fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
-                             dir_fd=directory_fd)
+                if os.name == "nt":
+                    from .windows_files import open_file
+
+                    fd = open_file(directory_fd / temp, write=True, exclusive=True)
+                else:
+                    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                 0o600, dir_fd=directory_fd)
                 with os.fdopen(fd, "wb") as target:
                     target.write(encoded)
                     target.flush()
                     os.fsync(target.fileno())
-                os.replace(temp, "context.json", src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
-                os.fsync(directory_fd)
+                if os.name == "nt":
+                    os.replace(directory_fd / temp, directory_fd / "context.json")
+                else:
+                    os.replace(temp, "context.json", src_dir_fd=directory_fd,
+                               dst_dir_fd=directory_fd)
+                    os.fsync(directory_fd)
             finally:
                 try:
-                    os.unlink(temp, dir_fd=directory_fd)
+                    if os.name == "nt":
+                        os.unlink(directory_fd / temp)
+                    else:
+                        os.unlink(temp, dir_fd=directory_fd)
                 except FileNotFoundError:
                     pass
             return data

@@ -30,7 +30,7 @@ def test_preview_origin_and_configuration():
     {"PREVIEW_MODE": "verify", "PREVIEW_MINUTES": "0"},
     {"PREVIEW_MODE": "verify", "TUNNEL_KIND": "named", "PREVIEW_PUBLIC_URL": "https://x.test"},
     {"PREVIEW_MODE": "other"},
-    {"PREVIEW_MODE": "verify", "PREVIEW_PLATFORM": "windows"},
+    {"PREVIEW_MODE": "verify", "PREVIEW_PLATFORM": "unknown"},
 ])
 def test_preview_fails_closed(env):
     with pytest.raises(ValueError):
@@ -57,6 +57,8 @@ def test_native_preview_cleanup_and_restart(monkeypatch, tmp_path):
     desktop.env = {"BRIDGE_DATA": str(tmp_path)}
     popen = Mock(return_value=Mock())
     monkeypatch.setattr(preview.subprocess, "Popen", popen)
+    monkeypatch.setattr(preview.subprocess, "run", Mock())
+    monkeypatch.setattr(preview.sys, "platform", "darwin")
     desktop.restart()
     service.terminate.assert_called_once()
     chrome.terminate.assert_not_called()
@@ -107,3 +109,29 @@ def test_native_start_uses_own_dynamic_cdp_and_filters_runner_secrets(monkeypatc
         assert discover.call_args.args[0] == preview.Path(desktop.directory.name) / "chrome"
     finally:
         desktop.close()
+
+
+def test_windows_preview_configuration_and_chrome_location(monkeypatch, tmp_path):
+    assert preview.configuration({"PREVIEW_PLATFORM": "windows", "PREVIEW_MODE": "verify"})[0] == "verify"
+    chrome = tmp_path / "Google/Chrome/Application/chrome.exe"
+    chrome.parent.mkdir(parents=True)
+    chrome.touch()
+    assert preview.chrome_executable("windows", {"PROGRAMFILES": str(tmp_path)}) == chrome
+    with pytest.raises(RuntimeError, match="missing"):
+        preview.chrome_executable("windows", {})
+
+
+def test_windows_cleanup_targets_owned_pid_not_all_chrome(monkeypatch):
+    from unittest.mock import Mock
+
+    process = Mock(pid=12345)
+    process.poll.return_value = None
+    run = Mock()
+    monkeypatch.setattr(preview.sys, "platform", "win32")
+    monkeypatch.setenv("SYSTEMROOT", "C:/Windows")
+    monkeypatch.setattr(preview.subprocess, "run", run)
+    preview.PreviewDesktop.stop_process(process)
+    args = run.call_args.args[0]
+    assert args[1:] == ["/PID", "12345", "/T", "/F"]
+    assert "/IM" not in args
+    assert run.call_args.kwargs["creationflags"] == 0x08000000

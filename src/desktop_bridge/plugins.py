@@ -169,12 +169,17 @@ def load_config(path: Path | None, workspace: Path) -> PluginConfig:
         if resolved.is_relative_to(workspace.resolve()):
             raise ValueError("Configuration cannot live in the model workspace")
         info = resolved.stat()
-        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o022:
+        if not stat.S_ISREG(info.st_mode) or (os.name != "nt" and info.st_mode & 0o022):
             raise ValueError("Configuration must be a regular file not writable by group/others")
         if info.st_size > MAX_CONFIG_BYTES:
             raise ValueError("Configuration is too large")
-        with resolved.open("rb") as stream:
-            data = stream.read(MAX_CONFIG_BYTES + 1)
+        if os.name == "nt":
+            from .windows_files import read_admin_file
+
+            data = read_admin_file(resolved, MAX_CONFIG_BYTES)
+        else:
+            with resolved.open("rb") as stream:
+                data = stream.read(MAX_CONFIG_BYTES + 1)
         if len(data) > MAX_CONFIG_BYTES:
             raise ValueError("Configuration is too large")
         return PluginConfig.model_validate_json(data)

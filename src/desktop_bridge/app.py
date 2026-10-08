@@ -96,10 +96,15 @@ class Runtime:
 
                 self.desktop = MacDesktop()
                 await self.desktop.screenshot()
+            elif backend == "windows":
+                from .windows import WindowsDesktop
+
+                self.desktop = WindowsDesktop()
+                await self.desktop.screenshot()
             elif backend == "vnc":
                 self.desktop = Desktop()
             else:
-                raise ValueError("BRIDGE_DESKTOP_BACKEND must be vnc or macos")
+                raise ValueError("BRIDGE_DESKTOP_BACKEND must be vnc, macos, or windows")
         self.browser = self.browser or Browser(
             os.environ.get("BRIDGE_CDP_ENDPOINT", "http://127.0.0.1:9222"))
         self.coding = self.coding or Coding(self.workspace)
@@ -173,7 +178,7 @@ class Runtime:
             ),
             tool(
                 "desktop_action",
-                "Desktop action. Coordinates use full screenshot pixels; scroll uses wheel ticks, positive dy down. macOS uses cmd for Command shortcuts. Fresh observation and unique action_id required.",
+                "Desktop action. Coordinates use full screenshot pixels; scroll uses wheel ticks, positive dy down. macOS shortcuts use cmd; Windows shortcuts use ctrl or win. Fresh observation and unique action_id required.",
                 {
                     "action": DesktopAction.model_json_schema(),
                     "observation_id": {"type": "string"},
@@ -545,6 +550,7 @@ def create_app(
     @app.get("/healthz")
     async def health():
         return JSONResponse({"ready": runtime.ready,
+                             "desktop_platform": getattr(runtime.desktop, "platform", "linux"),
                              "desktop_transport": getattr(runtime.desktop, "transport", "vnc")},
                             status_code=200 if runtime.ready else 503)
 
@@ -610,6 +616,7 @@ def create_app(
             "state": runtime.session.mode.upper(), "read_only": True,
             "expires_at": grant[1], "ready": runtime.ready,
             "desktop_transport": getattr(runtime.desktop, "transport", "vnc"),
+            "desktop_platform": getattr(runtime.desktop, "platform", "linux"),
             "resolution": dict(zip(("width", "height"),
                                    getattr(runtime.desktop, "size", None) or (1280, 800),
                                    strict=True)),
@@ -649,6 +656,7 @@ def create_app(
             "ready": runtime.ready,
             "context_store": runtime.context.status(),
             "desktop_transport": getattr(runtime.desktop, "transport", "vnc"),
+            "desktop_platform": getattr(runtime.desktop, "platform", "linux"),
             "resolution": dict(zip(("width", "height"),
                                    getattr(runtime.desktop, "size", None) or (1280, 800),
                                    strict=True)),

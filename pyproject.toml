@@ -12,8 +12,10 @@ dependencies = [
   "mcp==1.29.0", "fastapi==0.141.1", "uvicorn[standard]==0.52.1",
   "httpx==0.28.1", "playwright==1.62.0", "Pillow==12.2.0",
   "python-multipart==0.0.22",
+  "pywin32==312; sys_platform == 'win32'",
 ]
 [project.optional-dependencies]
+windows = ["coding-tools-mcp @ https://github.com/connbot/coding-tools-mcp/archive/a2b802171bee1f990effa55f955efa2eddde4c59.tar.gz"]
 macos = ["pyobjc-core==11.1", "pyobjc-framework-Cocoa==11.1", "pyobjc-framework-Quartz==11.1", "coding-tools-mcp @ https://github.com/connbot/coding-tools-mcp/archive/a2b802171bee1f990effa55f955efa2eddde4c59.tar.gz"]
 postgres = ["psycopg[binary]==3.3.6"]
 desktop = ["cua-computer-server[vnc]==0.3.46", "coding-tools-mcp @ https://github.com/connbot/coding-tools-mcp/archive/a2b802171bee1f990effa55f955efa2eddde4c59.tar.gz"]

@@ -1,10 +1,11 @@
-// PNG stream with server-authorized JSON input for native macOS previews.
+// PNG stream with server-authorized JSON input for native desktop previews.
 export default class NativeScreen extends EventTarget {
   constructor(target, url) {
     super();
     this.viewOnly = true;
+    this.platform = 'macos';
     this.image = document.createElement('img');
-    this.image.alt = 'macOS desktop';
+    this.image.alt = 'Native desktop';
     this.image.style.cssText = 'width:100%;height:100%;object-fit:contain;user-select:none';
     this.image.draggable = false;
     target.replaceChildren(this.image);
@@ -82,7 +83,7 @@ export default class NativeScreen extends EventTarget {
       }
       const aliases = {ArrowLeft:'left', ArrowRight:'right', ArrowUp:'up', ArrowDown:'down', ' ':'space'};
       const keys = [];
-      if (event.metaKey) keys.push('cmd');
+      if (event.metaKey) keys.push(this.platform === 'windows' ? 'win' : 'cmd');
       if (event.ctrlKey) keys.push('ctrl');
       if (event.altKey) keys.push('alt');
       if (event.shiftKey) keys.push('shift');

@@ -109,6 +109,26 @@ def to_quartz(point, mapping, pixels, bounds):
     return bx + px * bw / width, by + py * bh / height
 
 
+def wait_for_visual_mapping(capture, *, timeout=30, interval=.5):
+    """Wait for validated screen markers, since DOM readiness precedes native paint.
+
+    The callback must validate all markers and geometry before returning. Only
+    visual ProbeError failures are retried; capture/permission failures propagate.
+    """
+    deadline = time.monotonic() + timeout
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            return capture()
+        except ProbeError as exc:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ProbeError(
+                    f"visual readiness timeout after {attempts} captures: {exc}") from exc
+            time.sleep(min(interval, remaining))
+
+
 def prepare_fixture(directory: Path) -> tuple[Path, str]:
     path = directory / "fixture.html"
     path.write_bytes(HTML)
@@ -221,13 +241,14 @@ def run(output: Path) -> int:
                     report["stages"].append({"stage": stage, "status": "pass"})
 
                     def foreground():
+                        page.bring_to_front()
                         if not app.activateWithOptions_(2):  # NSApplicationActivateIgnoringOtherApps
                             raise ProbeError("Chrome activation failed")
                         time.sleep(.2)
                         if not app.isActive():
                             raise ProbeError("Chrome is not foreground")
 
-                    def capture(name):
+                    def capture_once(name):
                         path = output / name
                         subprocess.run(["/usr/sbin/screencapture", "-x", "-D", "1", str(path)],
                                        check=True, timeout=15)
@@ -243,6 +264,17 @@ def run(output: Path) -> int:
                         dom = [(b["x"] + b["width"] / 2, b["y"] + b["height"] / 2)
                                for b in boxes]
                         return axis_mapping(dom, points), size
+
+                    def capture(name):
+                        attempts = report.setdefault("capture_attempts", {})
+                        attempts[name] = 0
+
+                        def attempt():
+                            foreground()
+                            attempts[name] += 1
+                            return capture_once(name)
+
+                        return wait_for_visual_mapping(attempt)
 
                     def location(selector, mapping, size):
                         b = page.locator(selector).bounding_box()
@@ -277,7 +309,6 @@ def run(output: Path) -> int:
                         report["stages"].append({"stage": stage, "status": "pass"})
 
                     stage = "screenshot_before_mapping"
-                    foreground()
                     mapping, size = capture("before.png")
                     report["mapping"] = {"dom_to_pixels": mapping, "pixels": size,
                                          "quartz_bounds": bounds}
@@ -321,7 +352,6 @@ def run(output: Path) -> int:
                         mouse(Q.kCGEventLeftMouseUp, end)
                     check("probe.drag === true && probe.dragMoves > 0")
                     stage = "screenshot_after_mapping"
-                    foreground()
                     capture("after.png")
                     report["stages"].append({"stage": stage, "status": "pass"})
                     report["dom"] = page.evaluate("probe")

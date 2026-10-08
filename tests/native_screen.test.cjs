@@ -70,3 +70,9 @@ test('native reconnect cleanup revokes pixels and removes input listeners', () =
   assert.equal(h.screen.socket.closed, true);
   assert.deepEqual(h.revoked, ['blob:test']);
 });
+
+test('Windows viewer maps the Meta modifier to the native Windows key', () => {
+  const h = harness(); h.screen.viewOnly = false; h.screen.platform = 'windows';
+  h.emit(h.target, 'keydown', {key:'ArrowLeft',metaKey:true});
+  assert.deepEqual(h.screen.socket.messages, [{kind:'key',keys:['win','left']}]);
+});

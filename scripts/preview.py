@@ -32,8 +32,8 @@ def public_origin(value):
 
 
 def configuration(env):
-    if env.get("PREVIEW_PLATFORM", "linux") not in {"linux", "macos"}:
-        raise ValueError("PREVIEW_PLATFORM must be linux or macos")
+    if env.get("PREVIEW_PLATFORM", "linux") not in {"linux", "macos", "windows"}:
+        raise ValueError("PREVIEW_PLATFORM must be linux, macos, or windows")
     mode = env.get("PREVIEW_MODE", "preview")
     kind = env.get("TUNNEL_KIND", "quick")
     minutes = int(env.get("PREVIEW_MINUTES", "60"))
@@ -57,7 +57,7 @@ def configuration(env):
 def summary(message):
     print(message, flush=True)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
-        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
             stream.write(message + "\n\n")
 
 
@@ -77,25 +77,27 @@ class PreviewDesktop:
                  "-e", "BRIDGE_OWNER_TOKEN", "-e", "BRIDGE_PUBLIC_URL", "desktop-bridge:preview"],
                 env=env, check=True, stdout=subprocess.DEVNULL)
             return
-        if sys.platform != "darwin":
-            raise RuntimeError("macOS preview requires a macOS runner")
-        chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
-        if not chrome.is_file():
-            raise RuntimeError("Runner Google Chrome executable missing")
+        expected = {"macos": "darwin", "windows": "win32"}.get(self.platform)
+        if expected is None or sys.platform != expected:
+            raise RuntimeError(f"{self.platform} preview requires its native runner")
+        chrome = chrome_executable(self.platform, env)
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 8080))
-        self.directory = tempfile.TemporaryDirectory(prefix="bridge-macos-")
+        self.directory = tempfile.TemporaryDirectory(prefix=f"bridge-{self.platform}-")
         root = Path(self.directory.name)
         # Service processes do not inherit runner credentials or tunnel tokens.
-        self.env = {k: env[k] for k in ("PATH", "HOME", "LANG", "TMPDIR",
-                                       "BRIDGE_OWNER_TOKEN", "BRIDGE_PUBLIC_URL") if k in env}
-        self.env.update(BRIDGE_DESKTOP_BACKEND="macos", BRIDGE_BIND="127.0.0.1",
+        allowed = {"PATH", "HOME", "LANG", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "WINDIR",
+                   "COMSPEC", "PATHEXT", "USERPROFILE", "LOCALAPPDATA", "APPDATA",
+                   "BRIDGE_OWNER_TOKEN", "BRIDGE_PUBLIC_URL"}
+        self.env = {k: value for k, value in env.items() if k.upper() in allowed}
+        self.env.update(BRIDGE_DESKTOP_BACKEND=self.platform, BRIDGE_BIND="127.0.0.1",
                         BRIDGE_DATA=str(root / "data"))
         self.chrome = subprocess.Popen(
             [str(chrome), f"--user-data-dir={root / 'chrome'}",
              "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
              "--no-first-run", "--no-default-browser-check", "about:blank"],
-            env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            env={k: value for k, value in self.env.items() if not k.startswith("BRIDGE_")},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         from macos_probe import ProbeError, read_devtools_active_port
 
         for _ in range(60):
@@ -112,13 +114,13 @@ class PreviewDesktop:
 
     def _start_service(self):
         self.service = subprocess.Popen([sys.executable, "-m", "desktop_bridge.app"],
-                                        env=self.env)
+                                        env=self.env, **hidden_process_options())
 
     def check(self):
-        if self.platform == "macos" and any(
+        if self.platform in {"macos", "windows"} and any(
             process is None or process.poll() is not None for process in (self.chrome, self.service)
         ):
-            raise RuntimeError("Native macOS Chrome or MCP service exited")
+            raise RuntimeError("Native Chrome or MCP service exited")
 
     def restart(self):
         if self.platform == "linux":
@@ -131,6 +133,21 @@ class PreviewDesktop:
     @staticmethod
     def stop_process(process):
         if process and process.poll() is None:
+            if sys.platform == "win32":
+                # Only this owned Popen PID and its descendants; never image-name kills.
+                system_root = Path(os.environ["SYSTEMROOT"])
+                try:
+                    subprocess.run([str(system_root / "System32" / "taskkill.exe"),
+                                    "/PID", str(process.pid), "/T", "/F"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   timeout=10, **hidden_process_options())
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                try:
+                    process.wait(timeout=5)
+                    return
+                except subprocess.TimeoutExpired:
+                    pass
             process.terminate()
             try:
                 process.wait(timeout=15)
@@ -149,6 +166,23 @@ class PreviewDesktop:
                 self.directory.cleanup()
 
 
+def chrome_executable(platform, env):
+    if platform == "macos":
+        candidates = [Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")]
+    else:
+        candidates = [Path(env[key]) / "Google/Chrome/Application/chrome.exe"
+                      for key in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")
+                      if env.get(key)]
+    for path in candidates:
+        if path.is_file():
+            return path
+    raise RuntimeError("Runner Google Chrome executable missing")
+
+
+def hidden_process_options():
+    return {"creationflags": 0x08000000} if sys.platform == "win32" else {}
+
+
 def main():
     mode, kind, minutes, base = configuration(os.environ)
     if "--check" in sys.argv:
@@ -163,11 +197,14 @@ def main():
     print(f"::add-mask::{owner}", flush=True)
     if os.environ.get("TUNNEL_TOKEN"):
         print(f"::add-mask::{os.environ['TUNNEL_TOKEN']}", flush=True)
-    cloudflared = str(Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "cloudflared")
+    cloudflared = str(Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) /
+                     ("cloudflared.exe" if sys.platform == "win32" else "cloudflared"))
     log = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "bridge-tunnel.log"
     args = [cloudflared, "tunnel", "--no-autoupdate", "--protocol", "http2"]
     args += ["--url", "http://127.0.0.1:8080"] if kind == "quick" else ["run"]
-    tunnel_env = {k: os.environ[k] for k in ("PATH", "HOME", "TUNNEL_TOKEN") if k in os.environ}
+    tunnel_env = {k: value for k, value in os.environ.items()
+                  if k.upper() in {"PATH", "HOME", "TUNNEL_TOKEN", "SYSTEMROOT", "WINDIR",
+                                   "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA"}}
     process = None
     desktop = PreviewDesktop(os.environ.get("PREVIEW_PLATFORM", "linux"))
 
@@ -177,7 +214,8 @@ def main():
     signal.signal(signal.SIGTERM, interrupted)
     try:
         with log.open("w") as output:
-            process = subprocess.Popen(args, stdout=output, stderr=output, env=tunnel_env)
+            process = subprocess.Popen(args, stdout=output, stderr=output, env=tunnel_env,
+                                       **hidden_process_options())
         if kind == "quick":
             deadline = time.monotonic() + 90
             while time.monotonic() < deadline:
@@ -210,7 +248,8 @@ def main():
         # A working health check is insufficient. Verify discovery, PKCE, JSON MCP,
         # actual tools and authenticated desktop WebSocket across the public tunnel.
         smoke(base, owner, native_pid=desktop.chrome.pid if desktop.chrome else None,
-              native_endpoint=desktop.env.get("BRIDGE_CDP_ENDPOINT"))
+              native_endpoint=desktop.env.get("BRIDGE_CDP_ENDPOINT"),
+              native_platform=desktop.platform)
         if mode == "verify":
             summary("Public Cloudflare HTTPS smoke test passed. Disposable test session is now shutting down; this is not a user login URL.")
             return

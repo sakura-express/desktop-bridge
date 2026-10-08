@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "macos_probe.py"
 spec = importlib.util.spec_from_file_location("macos_probe", SCRIPT)
@@ -75,6 +75,42 @@ class MarkerTests(unittest.TestCase):
                 pixels[y * w + x] = (255, 255, 255)
         with self.assertRaises(probe.ProbeError):
             probe.find_marker(pixels, w, h, color)
+
+
+class VisualReadinessTests(unittest.TestCase):
+    def test_blank_initial_frame_retried_until_valid_mapping(self):
+        color = probe.MARKERS['a']
+        blank = [(255, 255, 255)] * (100 * 80)
+        valid = ((1, 22, 1, 83), (1024, 768))
+
+        def first_capture():
+            probe.find_marker(blank, 100, 80, color)
+
+        capture = Mock(side_effect=[first_capture, lambda: valid])
+        with patch.object(probe.time, 'monotonic', side_effect=[0, .1]), \
+                patch.object(probe.time, 'sleep') as sleep:
+            result = probe.wait_for_visual_mapping(lambda: capture()())
+        self.assertEqual(result, valid)
+        self.assertEqual(capture.call_count, 2)
+        sleep.assert_called_once_with(.5)
+
+    def test_persistent_invalid_geometry_times_out_with_last_reason(self):
+        capture = Mock(side_effect=probe.ProbeError('mapping: reflected geometry'))
+        with patch.object(probe.time, 'monotonic', side_effect=[0, .8, 1]), \
+                patch.object(probe.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(probe.ProbeError,
+                                        'timeout after 2 captures: mapping: reflected geometry'):
+                probe.wait_for_visual_mapping(capture, timeout=1)
+        self.assertEqual(capture.call_count, 2)
+        self.assertAlmostEqual(sleep.call_args.args[0], .2)
+
+    def test_capture_errors_propagate_without_retry(self):
+        capture = Mock(side_effect=PermissionError('screen capture denied'))
+        with patch.object(probe.time, 'sleep') as sleep:
+            with self.assertRaises(PermissionError):
+                probe.wait_for_visual_mapping(capture)
+        capture.assert_called_once_with()
+        sleep.assert_not_called()
 
 
 class PlatformTests(unittest.TestCase):

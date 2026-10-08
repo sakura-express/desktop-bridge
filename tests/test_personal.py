@@ -83,8 +83,9 @@ def test_profile_persists_as_private_atomic_json(store):
     path = store.directory / "context.json"
     assert json.loads(path.read_text()) == result
     assert PersonalStore(store.workspace).read() == result
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    assert stat.S_IMODE(store.directory.stat().st_mode) == 0o700
+    if os.name == "posix":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(store.directory.stat().st_mode) == 0o700
     assert not list(store.directory.glob(".context-*.tmp"))
 
 
@@ -193,6 +194,7 @@ def test_context_storage_rejects_symlink_redirection(store, tmp_path, target):
     assert sentinel.read_bytes() == original
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX FIFO contract")
 def test_context_fifo_is_rejected_without_hanging(store):
     store.directory.mkdir()
     os.mkfifo(store.directory / "context.json")
@@ -209,7 +211,8 @@ def test_context_fifo_is_rejected_without_hanging(store):
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("raw", [b"not JSON", b"[]", b'{"revision":true}', b'{"unknown":1}', b"x" * (MAX_CONTEXT_BYTES + 1)])
+@pytest.mark.parametrize("raw", [b"not JSON", b"[]", b'{"revision":true}', b'{"unknown":1}', b"x" * (MAX_CONTEXT_BYTES + 1)],
+                         ids=["invalid-json", "array", "invalid-revision", "unknown-field", "oversized"])
 def test_corrupt_or_oversized_context_is_not_silently_reset(store, raw):
     store.directory.mkdir()
     path = store.directory / "context.json"
@@ -512,7 +515,7 @@ def test_owner_export_import_round_trip_and_stale_revision(personal_app):
 @pytest.mark.parametrize("body", [
     b"[]", b"not json", b'{"expected_revision":true,"profile":{}}',
     b'{"expected_revision":0,"profile":{},"extra":1}', b"x" * (MAX_CONTEXT_BYTES + 1025),
-])
+], ids=["array", "invalid-json", "invalid-revision", "unknown-field", "oversized"])
 def test_owner_invalid_or_oversized_requests_leave_context_unchanged(personal_app, body):
     with TestClient(personal_app) as client:
         headers = login(client)

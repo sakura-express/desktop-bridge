@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-let csrf = '', rfb = null, screenKey = '', statusTimer = null, busy = false, currentMode = 'READY', connectionGeneration = 0, authGeneration = 0, desktopTransport = 'vnc';
+let csrf = '', rfb = null, screenKey = '', statusTimer = null, busy = false, currentMode = 'READY', connectionGeneration = 0, authGeneration = 0, desktopTransport = 'vnc', desktopPlatform = 'linux';
 async function api(path, options = {}) {
   const response = await fetch(path, {...options, headers: {'Content-Type':'application/json', 'X-CSRF-Token':csrf, ...options.headers}});
   const data = await response.json().catch(() => ({}));
@@ -27,6 +27,7 @@ async function connectScreen(mode, force = false) {
   $('screen').dataset.connected = 'false';
   $('screen').replaceChildren();
   rfb = new RFB($('screen'), `${location.protocol==='https:'?'wss':'ws'}://${location.host}/desktop/${key}`);
+  rfb.platform = desktopPlatform;
   rfb.addEventListener('connect', () => { if (rfb === connection) { $('screen').dataset.connected = 'true'; $('connection-label').textContent = 'Connected'; $('connection-overlay').hidden = true; } });
   rfb.scaleViewport = true; rfb.resizeSession = false; rfb.viewOnly = key === 'view';
   const connection = rfb;
@@ -60,7 +61,8 @@ async function refresh() {
     if (generation !== authGeneration) return;
     csrf=s.csrf;
     desktopTransport=s.desktop_transport || 'vnc';
-    if (desktopTransport === 'native') document.querySelector('.resolution').textContent = 'macOS';
+    desktopPlatform=s.desktop_platform || 'linux';
+    if (desktopTransport === 'native') document.querySelector('.resolution').textContent = s.desktop_platform === 'windows' ? 'Windows' : 'macOS';
     const pending = new URLSearchParams(location.search).get('authorize');
     if (pending) { const u = new URL(pending,location.origin); if(u.origin===location.origin && u.pathname==='/authorize'){location.replace(u);return;} }
     const entering = $('workspace').hidden;

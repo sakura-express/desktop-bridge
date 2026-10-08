@@ -71,6 +71,12 @@ input through public MCP before publishing the session. See the
 [macOS preview guide / macOS 预览指南](docs/macos-preview.zh-CN.md).
 The independent native desktop probe remains available for screenshot/JSON evidence.
 
+Experimental Windows previews are available with `windows-2025` and `windows-2022`
+(x64). They use Win32 capture/input, Chrome, Coding Tools, OAuth and the same PNG
+viewer. Each launch checks desktop availability and actual input through public MCP;
+an unavailable or locked runner desktop fails readiness. See the
+[Windows preview guide / Windows 预览指南](docs/windows-preview.zh-CN.md).
+
 ### 1. Start locally (optional self-hosting)
 
 You need Git, Python 3.11+, a running [Docker installation with Compose](https://docs.docker.com/compose/install/),

@@ -409,7 +409,9 @@ class Coding:
         env = {
             key: value
             for key, value in os.environ.items()
-            if key in {"PATH", "HOME", "LANG", "DISPLAY", "PYTHONPATH"}
+            if key.upper() in {"PATH", "HOME", "LANG", "DISPLAY", "PYTHONPATH",
+                               "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP",
+                               "USERPROFILE", "LOCALAPPDATA", "APPDATA"}
         }
         env["CODING_TOOLS_MCP_TELEMETRY"] = "off"
         streams = await self.stack.enter_async_context(

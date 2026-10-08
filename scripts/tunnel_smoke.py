@@ -9,7 +9,7 @@ import httpx
 from websockets.sync.client import connect
 
 
-def smoke(base, owner, *, native_pid=None, native_endpoint=None):
+def smoke(base, owner, *, native_pid=None, native_endpoint=None, native_platform="macos"):
     with httpx.Client(base_url=base, timeout=45, follow_redirects=False) as http:
         denied = http.post("/mcp", json={})
         assert denied.status_code == 401
@@ -77,9 +77,9 @@ def smoke(base, owner, *, native_pid=None, native_endpoint=None):
         assert any(item["type"] == "image" for item in shot["content"])
         assert not rpc("tools/call", {"name": "browser_snapshot", "arguments": {}}).get("isError")
         if native_pid is not None:
-            native_actions(rpc, native_pid, native_endpoint)
+            native_actions(rpc, native_pid, native_endpoint, platform=native_platform)
         command = rpc("tools/call", {"name": "coding_exec_command", "arguments": {
-            "cmd": "printf tunnel-ready", "yield_time_ms": 1000, "bridge_action_id": "public-tunnel-smoke",
+            "cmd": "echo tunnel-ready", "yield_time_ms": 1000, "bridge_action_id": "public-tunnel-smoke",
         }})
         assert not command.get("isError") and "tunnel-ready" in str(command)
         cookie = "; ".join(f"{k}={v}" for k, v in http.cookies.items())
@@ -94,7 +94,7 @@ def smoke(base, owner, *, native_pid=None, native_endpoint=None):
     print("PASS public HTTPS: OAuth discovery, PKCE, JSON MCP, real screenshot/browser/shell, desktop WebSocket, revocation", flush=True)
 
 
-def native_actions(rpc, pid, endpoint):
+def native_actions(rpc, pid, endpoint, *, platform="macos"):
     """Verify the actual MCP adapter's input against DOM and captured color markers."""
     import io
     import json
@@ -102,8 +102,14 @@ def native_actions(rpc, pid, endpoint):
     import time
     from pathlib import Path
 
-    from AppKit import NSRunningApplication
-    from macos_probe import MARKERS, axis_mapping, find_marker, prepare_fixture
+    from macos_probe import (
+        MARKERS,
+        ProbeError,
+        axis_mapping,
+        find_marker,
+        prepare_fixture,
+        wait_for_visual_mapping,
+    )
     from PIL import Image
     from playwright.sync_api import sync_playwright
 
@@ -123,14 +129,28 @@ def native_actions(rpc, pid, endpoint):
             page = browser.contexts[0].new_page()
             page.goto(url)
             page.bring_to_front()
-            app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
-            assert app is not None and app.activateWithOptions_(2), "Chrome activation failed"
+            if platform == "macos":
+                from AppKit import NSRunningApplication
+
+                app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+                assert app is not None, "Own Chrome application missing"
+            elif platform == "windows":
+                from desktop_bridge.windows import WindowsDesktop
+
+                desktop = WindowsDesktop()
+            else:
+                raise ValueError("Unsupported native smoke platform")
             page.wait_for_selector("#a")
 
-            def act(action, selector=None, end=None):
-                assert app.activateWithOptions_(2), "Chrome activation failed"
+            def capture_mapping():
+                page.bring_to_front()
+                if platform == "macos":
+                    assert app.activateWithOptions_(2), "Chrome activation failed"
+                else:
+                    page.bring_to_front()
                 time.sleep(.2)
-                assert app.isActive(), "Own Chrome is not foreground"
+                assert (app.isActive() if platform == "macos" else desktop.foreground_pid() == pid), \
+                    "Own Chrome is not foreground"
                 shot = call("desktop_screenshot")
                 data = next(item["data"] for item in shot["content"] if item["type"] == "image")
                 with Image.open(io.BytesIO(base64.b64decode(data))) as image:
@@ -138,8 +158,15 @@ def native_actions(rpc, pid, endpoint):
                     screen = [find_marker(image.get_flattened_data(), *image.size, color)
                               for color in MARKERS.values()]
                 boxes = [page.locator(f"#{key}").bounding_box() for key in MARKERS]
+                if any(b is None for b in boxes):
+                    raise ProbeError("test marker DOM box missing")
                 mapping = axis_mapping([(b["x"] + b["width"] / 2, b["y"] + b["height"] / 2)
                                         for b in boxes], screen)
+                return shot, mapping
+
+            def act(action, selector=None, end=None):
+                # Each action uses the observation from the latest validated frame.
+                shot, mapping = wait_for_visual_mapping(capture_mapping)
 
                 def point(target):
                     box = page.locator(target).bounding_box()
@@ -160,7 +187,7 @@ def native_actions(rpc, pid, endpoint):
             act({"kind": "click"}, "#text")
             act({"kind": "type", "text": "MCP 中文输入"})
             page.wait_for_function("input.value === 'MCP 中文输入'")
-            act({"kind": "key", "keys": ["cmd", "a"]})
+            act({"kind": "key", "keys": ["ctrl" if platform == "windows" else "cmd", "a"]})
             act({"kind": "type", "text": "MCP 中文替换"})
             page.wait_for_function("input.value === 'MCP 中文替换'")
             act({"kind": "scroll", "dy": 6}, "#scroll")
@@ -168,5 +195,5 @@ def native_actions(rpc, pid, endpoint):
             act({"kind": "drag"}, "#drag", "#drop")
             page.wait_for_function("probe.drag && probe.dragMoves > 0")
             page.close()
-        print("PASS native macOS input via public MCP: click, Chinese paste, Cmd+A, scroll, drag",
+        print(f"PASS native {platform} input via public MCP: click, Unicode input, select-all, scroll, drag",
               flush=True)

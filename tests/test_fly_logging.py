@@ -8,6 +8,9 @@ from pathlib import Path
 
 import pytest
 
+if os.name != "posix":
+    pytest.skip("Linux Fly logging uses POSIX pipes and sed", allow_module_level=True)
+
 ROOT = Path(__file__).resolve().parents[1]
 
 

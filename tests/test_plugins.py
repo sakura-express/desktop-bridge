@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 from contextlib import AsyncExitStack
 
 import httpx
@@ -132,8 +133,34 @@ def test_config_file_is_admin_owned_not_workspace(tmp_path):
     workspace.mkdir()
     path = tmp_path / "plugins.json"
     path.write_text('{"version":1,"servers":[]}')
+    if os.name == "nt":
+        import win32api
+        import win32con
+        import win32security
+
+        token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
+        try:
+            user = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+        finally:
+            token.Close()
+        dacl = win32security.ACL()
+        dacl.AddAccessAllowedAce(win32security.ACL_REVISION, 0x10000000, user)
+        win32security.SetNamedSecurityInfo(str(path), win32security.SE_FILE_OBJECT,
+                                          win32security.DACL_SECURITY_INFORMATION |
+                                          win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+                                          None, None, dacl, None)
     assert load_config(path, workspace).servers == []
-    path.chmod(0o666)
+    if os.name == "nt":
+        import win32security
+
+        dacl = win32security.ACL()
+        dacl.AddAccessAllowedAce(win32security.ACL_REVISION, 0x10000000,
+                                 win32security.CreateWellKnownSid(win32security.WinWorldSid))
+        win32security.SetNamedSecurityInfo(str(path), win32security.SE_FILE_OBJECT,
+                                          win32security.DACL_SECURITY_INFORMATION,
+                                          None, None, dacl, None)
+    else:
+        path.chmod(0o666)
     with pytest.raises(BridgeError, match="owner-managed"):
         load_config(path, workspace)
     nested = workspace / "plugins.json"
