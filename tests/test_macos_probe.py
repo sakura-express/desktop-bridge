@@ -105,5 +105,74 @@ class PlatformTests(unittest.TestCase):
             self.assertEqual(report['stages'][0]['stage'], 'platform')
 
 
+class FixtureAndActivePortTests(unittest.TestCase):
+    def test_prepare_fixture_content_and_url(self):
+        with tempfile.TemporaryDirectory() as td:
+            fixture_path, url = probe.prepare_fixture(Path(td))
+            self.assertTrue(fixture_path.is_file())
+            self.assertEqual(fixture_path.name, "fixture.html")
+            self.assertEqual(fixture_path.read_bytes(), probe.HTML)
+            self.assertTrue(url.startswith("file://"))
+            self.assertTrue(url.endswith("fixture.html"))
+
+    def test_devtools_active_port_valid(self):
+        with tempfile.TemporaryDirectory() as td:
+            port_file = Path(td) / "DevToolsActivePort"
+            port_file.write_text(
+                "54321\n/devtools/browser/d9b4b7a1-8d2a-4a2e-8c6f-3c5e7b8a9f01\n",
+                encoding="utf-8",
+            )
+            endpoint = probe.read_devtools_active_port(Path(td))
+            self.assertEqual(
+                endpoint,
+                "ws://127.0.0.1:54321/devtools/browser/d9b4b7a1-8d2a-4a2e-8c6f-3c5e7b8a9f01",
+            )
+
+    def test_devtools_active_port_missing_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(probe.ProbeError):
+                probe.read_devtools_active_port(Path(td))
+
+    def test_devtools_active_port_truncated_or_empty(self):
+        cases = ["", "54321\n", "\n\n", "   \n  \n"]
+        for content in cases:
+            with self.subTest(content=content):
+                with tempfile.TemporaryDirectory() as td:
+                    (Path(td) / "DevToolsActivePort").write_text(content, encoding="utf-8")
+                    with self.assertRaises(probe.ProbeError):
+                        probe.read_devtools_active_port(Path(td))
+
+    def test_devtools_active_port_invalid_port(self):
+        cases = ["not_a_number", "0", "-1", "65536", "70000"]
+        for port in cases:
+            with self.subTest(port=port):
+                with tempfile.TemporaryDirectory() as td:
+                    (Path(td) / "DevToolsActivePort").write_text(
+                        f"{port}\n/devtools/browser/d9b4b7a1-8d2a-4a2e-8c6f-3c5e7b8a9f01\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(probe.ProbeError):
+                        probe.read_devtools_active_port(Path(td))
+
+    def test_devtools_active_port_invalid_browser_path(self):
+        cases = [
+            "/other/path/uuid",
+            "/devtools/browser/",
+            "/devtools/browser/invalid@uuid!",
+            "/devtools/browser/-",
+            "/devtools/browser/abc",
+            "/devtools/browser/d9b4b7a18d2a4a2e8c6f3c5e7b8a9f01",
+            "d9b4b7a1-8d2a-4a2e-8c6f-3c5e7b8a9f01",
+        ]
+        for path in cases:
+            with self.subTest(path=path):
+                with tempfile.TemporaryDirectory() as td:
+                    (Path(td) / "DevToolsActivePort").write_text(
+                        f"54321\n{path}\n", encoding="utf-8"
+                    )
+                    with self.assertRaises(probe.ProbeError):
+                        probe.read_devtools_active_port(Path(td))
+
+
 if __name__ == '__main__':
     unittest.main()

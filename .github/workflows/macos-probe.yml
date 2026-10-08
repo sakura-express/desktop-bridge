@@ -5,8 +5,8 @@ on:
       runner:
         description: 'Disposable macOS runner (no MCP service or public preview)'
         type: choice
-        options: [macos-15, macos-15-intel]
-        default: macos-15
+        options: [macos-15, macos-15-intel, macos-26, macos-26-intel]
+        default: macos-26
 permissions:
   contents: read
 jobs:

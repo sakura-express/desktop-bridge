@@ -6,13 +6,11 @@ import ctypes
 import json
 import math
 import os
-import socket
 import subprocess
 import sys
 import tempfile
-import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import uuid
 from pathlib import Path
 
 MARKERS = {"a": (241, 17, 91), "b": (19, 229, 137), "c": (37, 83, 243)}
@@ -111,16 +109,40 @@ def to_quartz(point, mapping, pixels, bounds):
     return bx + px * bw / width, by + py * bh / height
 
 
-class TestPage(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(HTML)))
-        self.end_headers()
-        self.wfile.write(HTML)
+def prepare_fixture(directory: Path) -> tuple[Path, str]:
+    path = directory / "fixture.html"
+    path.write_bytes(HTML)
+    return path, path.resolve().as_uri()
 
-    def log_message(self, *_args):
-        pass
+
+def parse_devtools_active_port(content: str) -> str:
+    lines = [line.strip() for line in content.strip().splitlines() if line.strip()]
+    if len(lines) < 2:
+        raise ProbeError("DevToolsActivePort file incomplete")
+    try:
+        port = int(lines[0])
+    except ValueError as e:
+        raise ProbeError(f"invalid DevToolsActivePort port: {lines[0]}") from e
+    if not (1 <= port <= 65535):
+        raise ProbeError(f"DevToolsActivePort port out of range: {port}")
+    browser_path = lines[1]
+    if not browser_path.startswith("/devtools/browser/"):
+        raise ProbeError(f"invalid DevToolsActivePort browser path: {browser_path}")
+    uuid_part = browser_path[len("/devtools/browser/"):]
+    try:
+        browser_id = uuid.UUID(uuid_part)
+    except ValueError as e:
+        raise ProbeError(f"invalid DevToolsActivePort browser UUID: {browser_path}") from e
+    if str(browser_id) != uuid_part.lower():
+        raise ProbeError(f"invalid DevToolsActivePort browser UUID: {browser_path}")
+    return f"ws://127.0.0.1:{port}{browser_path}"
+
+
+def read_devtools_active_port(profile: Path) -> str:
+    port_file = profile / "DevToolsActivePort"
+    if not port_file.is_file():
+        raise ProbeError(f"DevToolsActivePort file missing: {port_file}")
+    return parse_devtools_active_port(port_file.read_text(encoding="utf-8"))
 
 
 def run(output: Path) -> int:
@@ -128,7 +150,7 @@ def run(output: Path) -> int:
     report = {"scope": "experimental native probe, not macOS MCP support", "stages": [],
               "permissions": {}, "finder": "not_run"}
     stage = "platform"
-    process = server = thread = None
+    process = None
     try:
         require_macos()
         stage = "imports"
@@ -165,17 +187,12 @@ def run(output: Path) -> int:
         chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
         if not chrome.is_file():
             raise ProbeError("runner Google Chrome executable missing")
-        # Fail if someone else owns 9222 instead of attaching to an unrelated browser.
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", 9222))
-        server = ThreadingHTTPServer(("127.0.0.1", 0), TestPage)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        with tempfile.TemporaryDirectory(prefix="macos-probe-") as profile:
-            url = f"http://127.0.0.1:{server.server_port}/"
+        with tempfile.TemporaryDirectory(prefix="macos-probe-fixture-") as fixture_dir, \
+                tempfile.TemporaryDirectory(prefix="macos-probe-profile-") as profile:
+            _fixture_path, url = prepare_fixture(Path(fixture_dir))
             process = subprocess.Popen([str(chrome), f"--user-data-dir={profile}",
                                         "--remote-debugging-address=127.0.0.1",
-                                        "--remote-debugging-port=9222", "--no-first-run",
+                                        "--remote-debugging-port=0", "--no-first-run",
                                         "--no-default-browser-check", url],
                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:
@@ -185,8 +202,8 @@ def run(output: Path) -> int:
                         if process.poll() is not None:
                             raise ProbeError("own Chrome process exited before CDP readiness")
                         try:
-                            browser = pw.chromium.connect_over_cdp("http://127.0.0.1:9222",
-                                                                   timeout=1000)
+                            endpoint = read_devtools_active_port(Path(profile))
+                            browser = pw.chromium.connect_over_cdp(endpoint, timeout=1000)
                             break
                         except Exception:
                             time.sleep(.5)
@@ -217,7 +234,8 @@ def run(output: Path) -> int:
                         with Image.open(path) as image:
                             image = image.convert("RGB")
                             size = image.size
-                            points = [find_marker(image.getdata(), *size, color)
+                            pixels = image.get_flattened_data()
+                            points = [find_marker(pixels, *size, color)
                                       for color in MARKERS.values()]
                         boxes = [page.locator(f"#{key}").bounding_box() for key in MARKERS]
                         if any(b is None for b in boxes):
@@ -327,11 +345,6 @@ def run(output: Path) -> int:
         return 1
     finally:
         stop_process(process)
-        if server:
-            server.shutdown()
-            server.server_close()
-        if thread:
-            thread.join(timeout=5)
         (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2),
                                           encoding="utf-8")
 
