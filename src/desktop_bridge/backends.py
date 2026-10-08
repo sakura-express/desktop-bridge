@@ -73,6 +73,11 @@ class Desktop:
         return result
 
     async def perform(self, action):
+        points = action["path"] if action["kind"] == "drag" else (
+            [(action["x"], action["y"])] if action["kind"] in {"click", "move", "scroll"} else []
+        )
+        if any(not (0 <= x < 1280 and 0 <= y < 800) for x, y in points):
+            raise BridgeError("DESKTOP_ERROR", "Coordinates outside 1280x800 desktop")
         h = self.handler
         kind = action["kind"]
         if kind == "click":

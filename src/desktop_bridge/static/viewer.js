@@ -5,7 +5,7 @@ let desktopTicket = fragment.get('ticket');
 fragment.delete('ticket');
 history.replaceState(null, '', location.pathname + location.search);
 const $ = id => document.getElementById(id);
-let rfb = null, generation = 0, timer = null, connecting = false, active = true;
+let rfb = null, generation = 0, timer = null, connecting = false, active = true, desktopTransport = 'vnc';
 
 function clearScreen(message, status) {
   generation++;
@@ -37,7 +37,8 @@ async function connectScreen() {
   connecting = true;
   const current = ++generation;
   try {
-    const {default:RFB} = await import('/novnc/core/rfb.js');
+    const {default:RFB} = desktopTransport === 'native'
+      ? await import('/static/native-screen.js') : await import('/novnc/core/rfb.js');
     if (current !== generation) return;
     const connection = new RFB($('viewer-screen'), `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/desktop/oauth/view`);
     rfb = connection;
@@ -69,7 +70,8 @@ async function refresh() {
   if (!active) return;
   const current = generation;
   try {
-    await api('/api/viewer/status');
+    const status = await api('/api/viewer/status');
+    desktopTransport = status.desktop_transport || 'vnc';
     if (current !== generation) return;
     await connectScreen();
   } catch (error) {

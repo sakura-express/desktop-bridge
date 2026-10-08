@@ -226,9 +226,9 @@ def test_owner_files_remain_available_during_private_takeover(app, tmp_path):
 @pytest.mark.parametrize(
     "payload",
     [
-        {"kind": "click", "x": 1280},
+        {"kind": "click", "x": 16384},
         {"kind": "click", "x": True},
-        {"kind": "drag", "path": [[0, 0], [1, 900]]},
+        {"kind": "drag", "path": [[0, 0], [1, 16384]]},
         {"kind": "key", "keys": ["ctrl-alt-delete"]},
         {"kind": "type", "text": "x" * 20001},
     ],

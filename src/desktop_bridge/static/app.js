@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-let csrf = '', rfb = null, screenKey = '', statusTimer = null, busy = false, currentMode = 'READY', connectionGeneration = 0, authGeneration = 0;
+let csrf = '', rfb = null, screenKey = '', statusTimer = null, busy = false, currentMode = 'READY', connectionGeneration = 0, authGeneration = 0, desktopTransport = 'vnc';
 async function api(path, options = {}) {
   const response = await fetch(path, {...options, headers: {'Content-Type':'application/json', 'X-CSRF-Token':csrf, ...options.headers}});
   const data = await response.json().catch(() => ({}));
@@ -21,7 +21,8 @@ async function connectScreen(mode, force = false) {
   rfb?.disconnect(); rfb = null; screenKey = key;
   $('connection-overlay').hidden = true;
   $('connection-label').textContent = 'Connecting…';
-  const {default:RFB} = await import('/novnc/core/rfb.js');
+  const {default:RFB} = desktopTransport === 'native'
+    ? await import('/static/native-screen.js') : await import('/novnc/core/rfb.js');
   if (generation !== connectionGeneration || $('workspace').hidden) return;
   $('screen').dataset.connected = 'false';
   $('screen').replaceChildren();
@@ -58,6 +59,8 @@ async function refresh() {
     const s=await api('/api/status');
     if (generation !== authGeneration) return;
     csrf=s.csrf;
+    desktopTransport=s.desktop_transport || 'vnc';
+    if (desktopTransport === 'native') document.querySelector('.resolution').textContent = 'macOS';
     const pending = new URLSearchParams(location.search).get('authorize');
     if (pending) { const u = new URL(pending,location.origin); if(u.origin===location.origin && u.pathname==='/authorize'){location.replace(u);return;} }
     const entering = $('workspace').hidden;

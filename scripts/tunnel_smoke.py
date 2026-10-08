@@ -9,7 +9,7 @@ import httpx
 from websockets.sync.client import connect
 
 
-def smoke(base, owner):
+def smoke(base, owner, *, native_pid=None):
     with httpx.Client(base_url=base, timeout=45, follow_redirects=False) as http:
         denied = http.post("/mcp", json={})
         assert denied.status_code == 401
@@ -76,6 +76,8 @@ def smoke(base, owner):
         shot = rpc("tools/call", {"name": "desktop_screenshot", "arguments": {}})
         assert any(item["type"] == "image" for item in shot["content"])
         assert not rpc("tools/call", {"name": "browser_snapshot", "arguments": {}}).get("isError")
+        if native_pid is not None:
+            native_actions(rpc, native_pid)
         command = rpc("tools/call", {"name": "coding_exec_command", "arguments": {
             "cmd": "printf tunnel-ready", "yield_time_ms": 1000, "bridge_action_id": "public-tunnel-smoke",
         }})
@@ -83,9 +85,93 @@ def smoke(base, owner):
         cookie = "; ".join(f"{k}={v}" for k, v in http.cookies.items())
         with connect(base.replace("https://", "wss://", 1) + "/desktop/view", origin=base,
                      additional_headers={"Cookie": cookie}, subprotocols=["binary"], open_timeout=30) as ws:
-            assert ws.recv(timeout=10).startswith(b"RFB ")
+            native = http.get("/healthz").json().get("desktop_transport") == "native"
+            assert ws.recv(timeout=30).startswith(b"\x89PNG\r\n\x1a\n" if native else b"RFB ")
         # Leave a clean, ready-to-authorize UI. No test access token remains valid.
         http.post("/api/control/paused", headers=headers).raise_for_status()
         http.post("/api/logout", headers=headers).raise_for_status()
         assert http.post("/mcp", headers=mcp_headers, json={}).status_code == 401
-    print("PASS public HTTPS: OAuth discovery, PKCE, JSON MCP, real screenshot/browser/shell, VNC WebSocket, revocation", flush=True)
+    print("PASS public HTTPS: OAuth discovery, PKCE, JSON MCP, real screenshot/browser/shell, desktop WebSocket, revocation", flush=True)
+
+
+def native_actions(rpc, pid):
+    """Verify the actual MCP adapter's input against DOM and captured color markers."""
+    import io
+    import json
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from AppKit import NSRunningApplication
+    from macos_probe import MARKERS, TestPage, axis_mapping, find_marker
+    from PIL import Image
+    from playwright.sync_api import sync_playwright
+
+    def call(name, arguments=None):
+        result = rpc("tools/call", {"name": name, "arguments": arguments or {}})
+        assert not result.get("isError"), result
+        return result
+
+    def metadata(result):
+        return json.loads(next(item["text"] for item in result["content"] if item["type"] == "text"))
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), TestPage)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    page = None
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/"
+        observation = metadata(call("browser_snapshot"))["observation_id"]
+        call("browser_action", {"action": {"kind": "new_tab", "url": url},
+                                "observation_id": observation, "action_id": secrets.token_hex(16)})
+        with sync_playwright() as pw:
+            browser = pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
+            page = next(p for context in browser.contexts for p in context.pages if p.url == url)
+            app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+            assert app is not None and app.activateWithOptions_(2), "Chrome activation failed"
+            page.wait_for_selector("#a")
+
+            def act(action, selector=None, end=None):
+                shot = call("desktop_screenshot")
+                data = next(item["data"] for item in shot["content"] if item["type"] == "image")
+                with Image.open(io.BytesIO(base64.b64decode(data))) as image:
+                    image = image.convert("RGB")
+                    screen = [find_marker(image.getdata(), *image.size, color)
+                              for color in MARKERS.values()]
+                boxes = [page.locator(f"#{key}").bounding_box() for key in MARKERS]
+                mapping = axis_mapping([(b["x"] + b["width"] / 2, b["y"] + b["height"] / 2)
+                                        for b in boxes], screen)
+
+                def point(target):
+                    box = page.locator(target).bounding_box()
+                    sx, ox, sy, oy = mapping
+                    return [round((box["x"] + box["width"] / 2) * sx + ox),
+                            round((box["y"] + box["height"] / 2) * sy + oy)]
+
+                if end:
+                    action["path"] = [point(selector), point(end)]
+                elif selector:
+                    action["x"], action["y"] = point(selector)
+                call("desktop_action", {"action": action,
+                                        "observation_id": metadata(shot)["observation_id"],
+                                        "action_id": secrets.token_hex(16)})
+
+            act({"kind": "click"}, "#click")
+            page.wait_for_function("probe.clicks === 1")
+            act({"kind": "click"}, "#text")
+            act({"kind": "type", "text": "MCP 中文输入"})
+            page.wait_for_function("input.value === 'MCP 中文输入'")
+            act({"kind": "key", "keys": ["cmd", "a"]})
+            act({"kind": "type", "text": "MCP 中文替换"})
+            page.wait_for_function("input.value === 'MCP 中文替换'")
+            act({"kind": "scroll", "dy": 6}, "#scroll")
+            page.wait_for_function("probe.scroll > 0")
+            act({"kind": "drag"}, "#drag", "#drop")
+            page.wait_for_function("probe.drag && probe.dragMoves > 0")
+            page.close()
+            page = None
+        print("PASS native macOS input via public MCP: click, Chinese paste, Cmd+A, scroll, drag",
+              flush=True)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

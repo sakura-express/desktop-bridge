@@ -89,7 +89,17 @@ class Runtime:
         self.ready = False
 
     async def start(self):
-        self.desktop = self.desktop or Desktop()
+        if self.desktop is None:
+            backend = os.environ.get("BRIDGE_DESKTOP_BACKEND", "vnc")
+            if backend == "macos":
+                from .macos import MacDesktop
+
+                self.desktop = MacDesktop()
+                await self.desktop.screenshot()
+            elif backend == "vnc":
+                self.desktop = Desktop()
+            else:
+                raise ValueError("BRIDGE_DESKTOP_BACKEND must be vnc or macos")
         self.browser = self.browser or Browser()
         self.coding = self.coding or Coding(self.workspace)
         await self.browser.connect()
@@ -162,7 +172,7 @@ class Runtime:
             ),
             tool(
                 "desktop_action",
-                "Cua desktop action. Coordinates use full 1280x800 image; scroll uses wheel ticks, positive dy down. Fresh observation and unique action_id required.",
+                "Desktop action. Coordinates use full screenshot pixels; scroll uses wheel ticks, positive dy down. macOS uses cmd for Command shortcuts. Fresh observation and unique action_id required.",
                 {
                     "action": DesktopAction.model_json_schema(),
                     "observation_id": {"type": "string"},
@@ -293,8 +303,8 @@ class Runtime:
                     "observation_id": observation,
                     "timestamp": time.time(),
                     "display_id": "0",
-                    "width": 1280,
-                    "height": 800,
+                    "width": (getattr(self.desktop, "size", None) or (1280, 800))[0],
+                    "height": (getattr(self.desktop, "size", None) or (1280, 800))[1],
                     "session_id": session.id,
                 }
                 if name == "desktop_screenshot":
@@ -533,7 +543,9 @@ def create_app(
 
     @app.get("/healthz")
     async def health():
-        return JSONResponse({"ready": runtime.ready}, status_code=200 if runtime.ready else 503)
+        return JSONResponse({"ready": runtime.ready,
+                             "desktop_transport": getattr(runtime.desktop, "transport", "vnc")},
+                            status_code=200 if runtime.ready else 503)
 
     @app.get("/")
     async def home():
@@ -596,7 +608,10 @@ def create_app(
         return {
             "state": runtime.session.mode.upper(), "read_only": True,
             "expires_at": grant[1], "ready": runtime.ready,
-            "resolution": {"width": 1280, "height": 800},
+            "desktop_transport": getattr(runtime.desktop, "transport", "vnc"),
+            "resolution": dict(zip(("width", "height"),
+                                   getattr(runtime.desktop, "size", None) or (1280, 800),
+                                   strict=True)),
         }
 
     @app.post("/api/login")
@@ -632,6 +647,10 @@ def create_app(
             "mcp_url": base_url + "/mcp",
             "ready": runtime.ready,
             "context_store": runtime.context.status(),
+            "desktop_transport": getattr(runtime.desktop, "transport", "vnc"),
+            "resolution": dict(zip(("width", "height"),
+                                   getattr(runtime.desktop, "size", None) or (1280, 800),
+                                   strict=True)),
         }
 
     @app.get("/api/plugins")
@@ -841,6 +860,48 @@ def create_app(
         epoch = session.epoch
         writer = None
         try:
+            if getattr(runtime.desktop, "transport", "vnc") == "native":
+                def can_control():
+                    return (authorized() and mode == "control" and session.epoch == epoch
+                            and session.mode in {"human", "private"}
+                            and not session.control_pending)
+
+                async def native_input():
+                    while True:
+                        packet = await websocket.receive_text()
+                        # Read-only sockets never parse or dispatch input.
+                        if not can_control() or len(packet) > 100_000:
+                            return
+                        action = DesktopAction.model_validate_json(packet).model_dump()
+                        async with session.lock:
+                            if not can_control():
+                                return
+                            await drain_on_cancel(runtime.desktop.perform(action))
+                            session.last_activity = time.monotonic()
+
+                async def native_frames():
+                    while authorized():
+                        if mode == "control" and not can_control():
+                            return
+                        async with session.lock:
+                            if not authorized():
+                                return
+                            frame_epoch = session.epoch
+                            frame = await drain_on_cancel(runtime.desktop.screenshot())
+                            if not authorized() or frame_epoch != session.epoch:
+                                return
+                            await websocket.send_bytes(frame)
+                        await asyncio.sleep(.5)
+
+                tasks = [asyncio.create_task(native_input()), asyncio.create_task(native_frames())]
+                try:
+                    await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    for task in tasks:
+                        task.cancel()
+                    with anyio.CancelScope(shield=True):
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                return
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", 5900 if mode == "control" else 5901
             )
@@ -893,7 +954,7 @@ def create_app(
                 # Finish draining our tasks even if its ASGI scope is cancelled.
                 with anyio.CancelScope(shield=True):
                     await asyncio.gather(*tasks, return_exceptions=True)
-        except (WebSocketDisconnect, OSError, RuntimeError):
+        except (WebSocketDisconnect, OSError, RuntimeError, ValidationError, BridgeError):
             pass
         finally:
             session.sockets.discard(websocket)
@@ -922,7 +983,8 @@ def create_app(
 def main():
     import uvicorn
 
-    uvicorn.run(create_app(), host="0.0.0.0", port=8080, access_log=False)
+    uvicorn.run(create_app(), host=os.environ.get("BRIDGE_BIND", "0.0.0.0"),
+                port=8080, access_log=False)
 
 
 if __name__ == "__main__":

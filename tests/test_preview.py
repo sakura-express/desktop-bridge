@@ -30,6 +30,7 @@ def test_preview_origin_and_configuration():
     {"PREVIEW_MODE": "verify", "PREVIEW_MINUTES": "0"},
     {"PREVIEW_MODE": "verify", "TUNNEL_KIND": "named", "PREVIEW_PUBLIC_URL": "https://x.test"},
     {"PREVIEW_MODE": "other"},
+    {"PREVIEW_MODE": "verify", "PREVIEW_PLATFORM": "windows"},
 ])
 def test_preview_fails_closed(env):
     with pytest.raises(ValueError):
@@ -43,3 +44,34 @@ def test_preview_accepts_normal_password_and_spaces():
 
 def test_preview_longest_bounded_demo():
     assert preview.configuration({"PREVIEW_MODE": "verify", "PREVIEW_MINUTES": "350"})[2] == 350
+
+
+def test_native_preview_cleanup_and_restart(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+
+    service, chrome = Mock(), Mock()
+    service.poll.return_value = chrome.poll.return_value = None
+    desktop = preview.PreviewDesktop("macos")
+    desktop.service, desktop.chrome = service, chrome
+    desktop.directory = Mock()
+    desktop.env = {"BRIDGE_DATA": str(tmp_path)}
+    popen = Mock(return_value=Mock())
+    monkeypatch.setattr(preview.subprocess, "Popen", popen)
+    desktop.restart()
+    service.terminate.assert_called_once()
+    chrome.terminate.assert_not_called()
+    assert popen.call_args.args[0] == [preview.sys.executable, "-m", "desktop_bridge.app"]
+    desktop.service = service
+    desktop.close()
+    chrome.terminate.assert_called_once()
+    desktop.directory.cleanup.assert_called_once()
+
+
+def test_native_preview_detects_dead_process():
+    from unittest.mock import Mock
+
+    desktop = preview.PreviewDesktop("macos")
+    desktop.service = Mock()
+    desktop.service.poll.return_value = 1
+    with pytest.raises(RuntimeError, match="exited"):
+        desktop.check()

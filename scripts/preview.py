@@ -5,8 +5,10 @@ import os
 import re
 import secrets
 import signal
+import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -30,6 +32,8 @@ def public_origin(value):
 
 
 def configuration(env):
+    if env.get("PREVIEW_PLATFORM", "linux") not in {"linux", "macos"}:
+        raise ValueError("PREVIEW_PLATFORM must be linux or macos")
     mode = env.get("PREVIEW_MODE", "preview")
     kind = env.get("TUNNEL_KIND", "quick")
     minutes = int(env.get("PREVIEW_MINUTES", "60"))
@@ -57,6 +61,83 @@ def summary(message):
             stream.write(message + "\n\n")
 
 
+class PreviewDesktop:
+    """Own only this preview's container or native processes and temporary files."""
+
+    def __init__(self, platform):
+        self.platform = platform
+        self.chrome = self.service = self.directory = None
+
+    def start(self, env):
+        self.env = env
+        if self.platform == "linux":
+            subprocess.run(
+                ["docker", "run", "-d", "--name", "bridge-preview", "--shm-size=1g",
+                 "--memory=3g", "--cpus=2", "--pids-limit=512", "-p", "127.0.0.1:8080:8080",
+                 "-e", "BRIDGE_OWNER_TOKEN", "-e", "BRIDGE_PUBLIC_URL", "desktop-bridge:preview"],
+                env=env, check=True, stdout=subprocess.DEVNULL)
+            return
+        if sys.platform != "darwin":
+            raise RuntimeError("macOS preview requires a macOS runner")
+        chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        if not chrome.is_file():
+            raise RuntimeError("Runner Google Chrome executable missing")
+        for port in (8080, 9222):
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", port))
+        self.directory = tempfile.TemporaryDirectory(prefix="bridge-macos-")
+        root = Path(self.directory.name)
+        # Service processes do not inherit runner credentials or tunnel tokens.
+        self.env = {k: env[k] for k in ("PATH", "HOME", "LANG", "TMPDIR",
+                                       "BRIDGE_OWNER_TOKEN", "BRIDGE_PUBLIC_URL") if k in env}
+        self.env.update(BRIDGE_DESKTOP_BACKEND="macos", BRIDGE_BIND="127.0.0.1",
+                        BRIDGE_DATA=str(root / "data"))
+        self.chrome = subprocess.Popen(
+            [str(chrome), f"--user-data-dir={root / 'chrome'}",
+             "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=9222",
+             "--no-first-run", "--no-default-browser-check", "about:blank"],
+            env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self._start_service()
+
+    def _start_service(self):
+        self.service = subprocess.Popen([sys.executable, "-m", "desktop_bridge.app"],
+                                        env=self.env)
+
+    def check(self):
+        if self.platform == "macos" and any(
+            process is None or process.poll() is not None for process in (self.chrome, self.service)
+        ):
+            raise RuntimeError("Native macOS Chrome or MCP service exited")
+
+    def restart(self):
+        if self.platform == "linux":
+            subprocess.run(["docker", "restart", "bridge-preview"], check=True,
+                           stdout=subprocess.DEVNULL)
+        else:
+            self.stop_process(self.service)
+            self._start_service()
+
+    @staticmethod
+    def stop_process(process):
+        if process and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+    def close(self):
+        if self.platform == "linux":
+            subprocess.run(["docker", "rm", "-fv", "bridge-preview"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            self.stop_process(self.service)
+            self.stop_process(self.chrome)
+            if self.directory:
+                self.directory.cleanup()
+
+
 def main():
     mode, kind, minutes, base = configuration(os.environ)
     if "--check" in sys.argv:
@@ -77,6 +158,7 @@ def main():
     args += ["--url", "http://127.0.0.1:8080"] if kind == "quick" else ["run"]
     tunnel_env = {k: os.environ[k] for k in ("PATH", "HOME", "TUNNEL_TOKEN") if k in os.environ}
     process = None
+    desktop = PreviewDesktop(os.environ.get("PREVIEW_PLATFORM", "linux"))
 
     def interrupted(*_):
         raise KeyboardInterrupt
@@ -98,15 +180,11 @@ def main():
             if not base:
                 raise RuntimeError("Cloudflare did not allocate a URL within 90 seconds")
         env = {**os.environ, "BRIDGE_OWNER_TOKEN": owner, "BRIDGE_PUBLIC_URL": base}
-        subprocess.run(
-            ["docker", "run", "-d", "--name", "bridge-preview", "--shm-size=1g",
-             "--memory=3g", "--cpus=2", "--pids-limit=512", "-p", "127.0.0.1:8080:8080",
-             "-e", "BRIDGE_OWNER_TOKEN", "-e", "BRIDGE_PUBLIC_URL", "desktop-bridge:preview"],
-            env=env, check=True, stdout=subprocess.DEVNULL,
-        )
+        desktop.start(env)
         with httpx.Client(timeout=15, follow_redirects=False) as client:
             deadline = time.monotonic() + 180
             while time.monotonic() < deadline:
+                desktop.check()
                 if process.poll() is not None:
                     raise RuntimeError("Cloudflare tunnel stopped")
                 try:
@@ -119,18 +197,20 @@ def main():
             else:
                 raise RuntimeError("Public HTTPS readiness failed; check named hostname routing to http://127.0.0.1:8080")
         # A working health check is insufficient. Verify discovery, PKCE, JSON MCP,
-        # actual tools and authenticated noVNC WebSocket across the public tunnel.
-        smoke(base, owner)
+        # actual tools and authenticated desktop WebSocket across the public tunnel.
+        smoke(base, owner, native_pid=desktop.chrome.pid if desktop.chrome else None)
         if mode == "verify":
             summary("Public Cloudflare HTTPS smoke test passed. Disposable test session is now shutting down; this is not a user login URL.")
             return
         # Clear test registrations and restore READY so the first real client
         # can start without inheriting the smoke test's paused state.
-        subprocess.run(["docker", "restart", "bridge-preview"], check=True, stdout=subprocess.DEVNULL)
+        desktop.restart()
         with httpx.Client(timeout=10) as client:
             for _ in range(60):
+                desktop.check()
                 try:
-                    if client.get(base + "/healthz").status_code == 200:
+                    response = client.get(base + "/healthz")
+                    if response.status_code == 200 and response.json().get("ready"):
                         break
                 except httpx.HTTPError:
                     pass
@@ -138,11 +218,12 @@ def main():
             else:
                 raise RuntimeError("Desktop failed readiness after clearing test state")
         expiry = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(time.time() + minutes * 60))
-        summary(f"## Agent Computer development preview\n\nMCP endpoint: {base}/mcp\n\nDesktop and OAuth login: {base}\n\nAuthentication: OAuth with dynamic client registration and PKCE. Sign in using your BRIDGE_OWNER_TOKEN; never paste it into ChatGPT.\n\nScheduled stop: {expiry}. Cancel this workflow to stop early. Download needed files before stopping: the desktop and its data are disposable.\n\nQuick URLs change on restart. This session is for developing and testing Agent Computer, not permanent hosting.")
+        summary(f"## Agent Computer development preview ({desktop.platform})\n\nMCP endpoint: {base}/mcp\n\nDesktop and OAuth login: {base}\n\nAuthentication: OAuth with dynamic client registration and PKCE. Sign in using your BRIDGE_OWNER_TOKEN; never paste it into ChatGPT.\n\nScheduled stop: {expiry}. Cancel this workflow to stop early. Download needed files before stopping: the desktop and its data are disposable.\n\nQuick URLs change on restart. This session is for developing and testing Agent Computer, not permanent hosting.")
         deadline = time.monotonic() + minutes * 60
         failures = 0
         with httpx.Client(timeout=10) as client:
             while time.monotonic() < deadline:
+                desktop.check()
                 if process.poll() is not None:
                     raise RuntimeError("Cloudflare tunnel exited; start a new preview")
                 try:
@@ -161,7 +242,7 @@ def main():
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
-        subprocess.run(["docker", "rm", "-fv", "bridge-preview"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        desktop.close()
         log.unlink(missing_ok=True)
 
 

@@ -7,8 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class DesktopAction(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     kind: Literal["click", "move", "scroll", "drag", "type", "key"]
-    x: int = Field(default=0, ge=0, lt=1280)
-    y: int = Field(default=0, ge=0, lt=800)
+    x: int = Field(default=0, ge=0, lt=16384)
+    y: int = Field(default=0, ge=0, lt=16384)
     button: Literal["left", "right", "middle"] = "left"
     count: int = Field(default=1, ge=1, le=2)
     dx: int = Field(default=0, ge=-20, le=20)
@@ -21,7 +21,7 @@ class DesktopAction(BaseModel):
     def validate_action(self):
         if self.kind == "drag":
             if len(self.path) < 2 or any(
-                len(p) != 2 or not (0 <= p[0] < 1280 and 0 <= p[1] < 800) for p in self.path
+                len(p) != 2 or not (0 <= p[0] < 16384 and 0 <= p[1] < 16384) for p in self.path
             ):
                 raise ValueError("Drag requires 2–100 in-bounds [x,y] points")
         if self.kind == "key":

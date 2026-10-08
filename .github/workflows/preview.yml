@@ -2,6 +2,11 @@ name: Launch MCP preview
 on:
   workflow_dispatch:
     inputs:
+      runner:
+        description: 'Desktop OS: Linux Docker or experimental native macOS'
+        type: choice
+        options: [ubuntu-latest, macos-26, macos-15-intel]
+        default: ubuntu-latest
       mode:
         description: 'preview: interactive development session; verify: short tunnel smoke test'
         type: choice
@@ -23,21 +28,22 @@ on:
         default: ''
   push:
     branches: [main]
-    paths: ['.github/workflows/preview.yml', 'scripts/preview.py', 'scripts/tunnel_smoke.py', 'scripts/desktop_smoke.py', 'Dockerfile', 'docker/**']
+    paths: ['.github/workflows/preview.yml', 'scripts/preview.py', 'scripts/tunnel_smoke.py', 'scripts/desktop_smoke.py', 'scripts/macos_probe.py', 'src/desktop_bridge/macos.py', 'Dockerfile', 'docker/**']
 permissions:
   contents: read
 concurrency:
-  group: desktop-preview-${{ github.event_name }}
+  group: desktop-preview-${{ github.event_name }}-${{ inputs.runner || 'ubuntu-latest' }}
   cancel-in-progress: false
 jobs:
   preview:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'push' && 'ubuntu-latest' || inputs.runner }}
     timeout-minutes: 360
     env:
       PREVIEW_MODE: ${{ github.event_name == 'push' && 'verify' || inputs.mode }}
       TUNNEL_KIND: ${{ github.event_name == 'push' && 'quick' || inputs.tunnel }}
       PREVIEW_MINUTES: ${{ inputs.minutes || '60' }}
       PREVIEW_PUBLIC_URL: ${{ inputs.public_url }}
+      PREVIEW_PLATFORM: ${{ startsWith(inputs.runner, 'macos-') && 'macos' || 'linux' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -51,6 +57,7 @@ jobs:
           TUNNEL_TOKEN: ${{ github.event_name == 'workflow_dispatch' && secrets.CLOUDFLARE_TUNNEL_TOKEN || '' }}
         run: python scripts/preview.py --check
       - name: Install pinned tunnel client and test dependencies
+        if: runner.os == 'Linux'
         run: |
           curl --fail --silent --show-error --location --retry 3 \
             https://github.com/cloudflare/cloudflared/releases/download/2026.9.3/cloudflared-linux-amd64 \
@@ -58,9 +65,31 @@ jobs:
           echo "77e26d8d900e0b8469f416239d14b5f296525fdf79fee6f511ef55609e3fbac2  $RUNNER_TEMP/cloudflared" | sha256sum --check
           chmod +x "$RUNNER_TEMP/cloudflared"
           pip install 'httpx==0.28.1' 'websockets==15.0.1'
+      - name: Install pinned native macOS service and tunnel client
+        if: runner.os == 'macOS'
+        run: |
+          case "$(uname -m)" in
+            arm64) arch=arm64; digest=587c2cfb1c230fe36c7fa7727da78be459dae028cabe8c001291999350f07095 ;;
+            x86_64) arch=amd64; digest=d1155d0837487f261183b15c1eab6c4ebcad9dc49b94675f1524c3564cea3977 ;;
+            *) echo 'Unsupported macOS architecture'; exit 1 ;;
+          esac
+          curl --fail --silent --show-error --location --retry 3 \
+            "https://github.com/cloudflare/cloudflared/releases/download/2026.9.3/cloudflared-darwin-$arch.tgz" \
+            -o "$RUNNER_TEMP/cloudflared.tgz"
+          echo "$digest  $RUNNER_TEMP/cloudflared.tgz" | shasum -a 256 --check
+          tar -xzf "$RUNNER_TEMP/cloudflared.tgz" -C "$RUNNER_TEMP" cloudflared
+          chmod +x "$RUNNER_TEMP/cloudflared"
+          python -m pip install -c constraints.txt -e '.[macos,test]' 'websockets==17.2'
+      - name: Verify native macOS desktop before publishing MCP
+        if: runner.os == 'macOS'
+        run: |
+          python -m pytest tests/test_macos_probe.py tests/test_macos_backend.py tests/test_preview.py -q
+          python scripts/macos_probe.py --output macos-probe-artifacts
       - name: Build desktop
+        if: runner.os == 'Linux'
         run: docker build -t desktop-bridge:preview .
       - name: Verify desktop survives closing the browser
+        if: runner.os == 'Linux'
         run: |
           cleanup() { docker rm -fv bridge-desktop-smoke >/dev/null 2>&1 || true; }
           trap cleanup EXIT
@@ -77,5 +106,13 @@ jobs:
           TUNNEL_TOKEN: ${{ github.event_name == 'workflow_dispatch' && secrets.CLOUDFLARE_TUNNEL_TOKEN || '' }}
         run: python scripts/preview.py
       - name: Remove disposable desktop and volumes
-        if: always()
+        if: always() && runner.os == 'Linux'
         run: docker rm -fv bridge-preview 2>/dev/null || true
+      - name: Upload macOS preflight evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always() && runner.os == 'macOS'
+        with:
+          name: macos-preview-preflight-${{ inputs.runner }}-${{ github.run_id }}
+          path: macos-probe-artifacts/
+          retention-days: 3
+          if-no-files-found: warn
