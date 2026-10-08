@@ -296,8 +296,8 @@ class Browser:
             self._live_tabs()
             guard()
             await page.bring_to_front()
+            guard()
             try:
-                guard()
                 response = await page.goto(requested_url, wait_until="domcontentloaded", timeout=20000)
             except asyncio.CancelledError:
                 raise
@@ -323,8 +323,8 @@ class Browser:
         else:
             page = await self.page(observation.browser_tab_id)
             if kind == "navigate":
+                guard()
                 try:
-                    guard()
                     response = await page.goto(requested_url, wait_until="domcontentloaded", timeout=20000)
                 except asyncio.CancelledError:
                     raise

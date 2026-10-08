@@ -138,11 +138,107 @@ async def test_browser_perform_and_snapshot_simulation():
         assert e.code == "NAVIGATION_FAILED"
 
 
+async def test_navigation_and_new_tab_guard_failure_propagates_without_goto():
+    # 1. navigate: final guard throws -> same BridgeError propagated, goto never called
+    class SpyNavigatePage:
+        def __init__(self, url="https://example.com"):
+            self.url = url
+            self.goto_calls = []
+
+        # Test double mimicking Playwright Page.goto timeout parameter
+        async def goto(self, url, wait_until=None, timeout=None):  # noqa: ASYNC109
+            self.goto_calls.append(url)
+            raise AssertionError("goto should not be called when guard fails")
+
+    nav_page = SpyNavigatePage()
+    b = Browser()
+    b._tabs = {"tab-1": nav_page}
+    b.page = lambda expected_tab_id: asyncio.sleep(0, result=b._tabs[expected_tab_id])
+    b._live_tabs = lambda: list(b._tabs.items())
+    obs = Observation(epoch=0, at=0, browser_tab_id="tab-1", browser_tab_ids=("tab-1",))
+
+    expected_nav_err = BridgeError("CONTROL_NOT_OWNED", "Control revoked before navigate")
+
+    def failing_nav_guard():
+        raise expected_nav_err
+
+    try:
+        await b.perform(
+            {"kind": "navigate", "url": "https://example.test/dest"},
+            observation=obs,
+            guard=failing_nav_guard,
+        )
+        raise AssertionError("Should raise CONTROL_NOT_OWNED BridgeError")
+    except BridgeError as e:
+        assert e is expected_nav_err
+        assert e.code == "CONTROL_NOT_OWNED"
+    assert len(nav_page.goto_calls) == 0
+
+    # 2. new_tab: earlier guards succeed (creation & bring_to_front), final guard throws
+    # -> same BridgeError propagated, goto never called
+    class SpyNewPage:
+        def __init__(self):
+            self.url = "about:blank"
+            self.goto_calls = []
+
+        async def bring_to_front(self):
+            pass
+
+        # Test double mimicking Playwright Page.goto timeout parameter
+        async def goto(self, url, wait_until=None, timeout=None):  # noqa: ASYNC109
+            self.goto_calls.append(url)
+            raise AssertionError("goto should not be called when guard fails")
+
+    new_page = SpyNewPage()
+
+    class FakeContext:
+        def __init__(self, page_obj):
+            self.page_obj = page_obj
+
+        async def new_page(self):
+            return self.page_obj
+
+    context = FakeContext(new_page)
+
+    class ExistingTab:
+        def __init__(self, ctx):
+            self.context = ctx
+
+    b_new = Browser()
+    b_new._tabs = {"tab-1": ExistingTab(context)}
+    b_new.page = lambda expected_tab_id: asyncio.sleep(0, result=b_new._tabs[expected_tab_id])
+    b_new._live_tabs = lambda: list(b_new._tabs.items())
+
+    expected_new_tab_err = BridgeError("CONTROL_NOT_OWNED", "Control revoked before new_tab goto")
+    guard_call_count = 0
+
+    def new_tab_guard():
+        nonlocal guard_call_count
+        guard_call_count += 1
+        # Guards: 1. pre new_page, 2. pre bring_to_front, 3. pre goto
+        if guard_call_count >= 3:
+            raise expected_new_tab_err
+
+    try:
+        await b_new.perform(
+            {"kind": "new_tab", "url": "https://example.test/new"},
+            observation=obs,
+            guard=new_tab_guard,
+        )
+        raise AssertionError("Should raise CONTROL_NOT_OWNED BridgeError")
+    except BridgeError as e:
+        assert e is expected_new_tab_err
+        assert e.code == "CONTROL_NOT_OWNED"
+    assert guard_call_count == 3
+    assert len(new_page.goto_calls) == 0
+
+
 async def main():
     test_safe_url_strips_credentials()
     test_extract_redirect_chain()
     await test_session_idempotency_and_stale_recovery()
     await test_browser_perform_and_snapshot_simulation()
+    await test_navigation_and_new_tab_guard_failure_propagates_without_goto()
     print("ALL PYTHON DESKTOP-BRIDGE TESTS PASSED!")
 
 
