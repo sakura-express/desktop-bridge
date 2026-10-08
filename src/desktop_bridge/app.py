@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote, urlencode, urlsplit
 
+import anyio
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -888,18 +889,23 @@ def create_app(
             finally:
                 for task in tasks:
                     task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                # The peer can leave immediately after receiving a close frame.
+                # Finish draining our tasks even if its ASGI scope is cancelled.
+                with anyio.CancelScope(shield=True):
+                    await asyncio.gather(*tasks, return_exceptions=True)
         except (WebSocketDisconnect, OSError, RuntimeError):
             pass
         finally:
             session.sockets.discard(websocket)
-            if writer:
-                writer.close()
-                await writer.wait_closed()
-            try:
-                await websocket.close()
-            except (RuntimeError, WebSocketDisconnect):
-                pass
+            # VNC cleanup must also survive cancellation of the request scope.
+            with anyio.CancelScope(shield=True):
+                if writer:
+                    writer.close()
+                    await writer.wait_closed()
+                try:
+                    await websocket.close()
+                except (RuntimeError, WebSocketDisconnect):
+                    pass
 
     class MCPApp:
         async def __call__(self, scope, receive, send):

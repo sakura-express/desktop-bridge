@@ -3,6 +3,7 @@ import base64
 import hashlib
 from urllib.parse import parse_qs, urlsplit
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -158,3 +159,88 @@ def test_readonly_websocket_forwarding_and_live_authorization(app, monkeypatch, 
             with pytest.raises(WebSocketDisconnect):
                 with client.websocket_connect("/desktop/oauth/view", headers={"Origin": "http://testserver"}):
                     pytest.fail("Private desktop visible")
+
+
+@pytest.mark.parametrize("phase", ["tasks", "writer"])
+def test_private_websocket_cancellation_finishes_cleanup(app, monkeypatch, phase):
+    import desktop_bridge.app as app_module
+
+    entered = anyio.Event()
+    release = anyio.Event()
+    completed = []
+    request_scopes = []
+    forwarding_tasks = []
+
+    class CancellationProbe:
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] != "websocket":
+                return await self.app(scope, receive, send)
+            with anyio.CancelScope() as cancel_scope:
+                request_scopes.append(cancel_scope)
+                await self.app(scope, receive, send)
+
+    app.add_middleware(CancellationProbe)
+    original_gather = asyncio.gather
+
+    async def gather(*tasks, **kwargs):
+        forwarding_tasks.extend(tasks)
+        if phase == "tasks":
+            entered.set()
+            await release.wait()
+        result = await original_gather(*tasks, **kwargs)
+        completed.append("tasks")
+        return result
+
+    class Writer:
+        def write(self, data):
+            pass
+
+        async def drain(self):
+            pass
+
+        def close(self):
+            completed.append("close")
+
+        async def wait_closed(self):
+            if phase == "writer":
+                entered.set()
+                await release.wait()
+            completed.append("writer")
+
+    async def open_connection(host, port):
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"frame")
+        return reader, Writer()
+
+    async def wait_for_cleanup():
+        with anyio.fail_after(5):
+            await entered.wait()
+
+    async def cancel_during_cleanup():
+        request_scopes[-1].cancel()
+        # Deliver request cancellation while cleanup is suspended, then allow
+        # shielded cleanup to finish. No wall-clock timing is needed.
+        await anyio.sleep(0)
+        release.set()
+
+    monkeypatch.setattr(app_module.asyncio, "open_connection", open_connection)
+    with TestClient(app) as client:
+        token = oauth(client)
+        assert redeem(client, ticket(client, token)).status_code == 200
+        with client.websocket_connect("/desktop/oauth/view", headers={"Origin": "http://testserver"}) as ws:
+            assert ws.receive_bytes() == b"frame"
+            # Patch only while this connection is active, not lifespan shutdown.
+            with monkeypatch.context() as cleanup_patch:
+                cleanup_patch.setattr(app_module.asyncio, "gather", gather)
+                client.portal.call(app.state.runtime.control, "private")
+                ws.send_bytes(b"stop")
+                with pytest.raises(WebSocketDisconnect):
+                    ws.receive_bytes()
+                client.portal.call(wait_for_cleanup)
+                client.portal.call(cancel_during_cleanup)
+        assert completed == ["tasks", "close", "writer"]
+        assert forwarding_tasks and all(task.done() for task in forwarding_tasks)
+        assert not app.state.runtime.session.sockets
