@@ -10,7 +10,7 @@
 
 使用 checkout/setup-python 的固定 SHA，Python 3.12，Pillow 12.2.0 / Playwright 1.62.0 与项目当前版本一致。PyObjC core、Cocoa、Quartz 固定为 11.1；Quartz 11.1 的 PyPI 元数据明确列出 Python 3.12，提供 `cp312-macosx_10_13_universal2` wheel，支持 Intel/ARM 两种架构[1](https://pypi.org/pypi/pyobjc-framework-Quartz/11.1/json)。这证明 Python/架构包兼容性，不证明 runner 上 TCC、WindowServer、原生输入必然可用。runner 标签、预装 Chrome 和权限策略可能变化。
 
-依赖只在远端安装，不安装 Playwright 浏览器。检测 `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`，直接启动 headed Chrome，CDP 绑定 loopback 9222，使用独立临时 profile；端口被占用立即失败，不连接他人的浏览器。不使用 `--no-sandbox`，不使用全局 profile、登录账号或公网隧道。
+依赖只在远端安装，不安装 Playwright 浏览器。检测 `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`，直接启动 headed Chrome，CDP 使用 `--remote-debugging-port=0` 绑定 loopback 动态端口，从新 profile 的 `DevToolsActivePort` 发现专用 endpoint，使用独立临时 profile；不连接他人的浏览器。不使用 `--no-sandbox`，不使用全局 profile、登录账号或公网隧道。
 
 ## 验收 artifact
 
@@ -20,7 +20,7 @@
 
 先检查 before/after 的真实测试窗口与三块色标，再检查 report 的 `native_click`、`native_chinese_paste`、`native_keyboard_replace`、`native_scroll`、`native_drag` 和两次截图映射阶段。自动成功仍不涵盖 Finder 人工验收。
 
-网页由 `ThreadingHTTPServer` 在 `127.0.0.1` 独立临时端口提供。按钮计数、完整中文输入、Cmd+A 选择/替换、scrollTop 增加、拖动目标状态均由 DOM 断言；鼠标、按键、滚轮和拖动使用 Quartz CGEvent，中文用 UTF-8 pbcopy + Cmd+V。Playwright 只准备/读取页面状态与几何信息，不使用 click/fill/press 替代原生输入。每组动作前激活并检查自己启动的 Chrome 前台状态。
+网页写入独立临时 HTML 文件并通过本地 `file://` URI 加载，避免 Python 本地网络端口监听引入权限弹窗。按钮计数、完整中文输入、Cmd+A 选择/替换、scrollTop 增加、拖动目标状态均由 DOM 断言；鼠标、按键、滚轮和拖动使用 Quartz CGEvent，中文用 UTF-8 pbcopy + Cmd+V。Playwright 只准备/读取页面状态与几何信息，不使用 click/fill/press 替代原生输入。每组动作前激活并检查自己启动的 Chrome 前台状态。
 
 ## 权限与失败边界
 
@@ -28,7 +28,7 @@
 
 不请求/自动点击权限弹窗，不篡改 TCC.db，不禁用 SIP。只截壁纸、色标缺失/多匹配、非矩形杂色、反射/不一致的几何、越界坐标均拒绝猜测。此阶段明确只支持一个活动显示器，避免多显示器 capture index 与 Quartz 坐标归属歧义；超出范围失败而非 browser-only 降级。
 
-finally 终止自己启动的 Chrome、停止 HTTP server，移除临时 profile；不杀其他 Chrome/Finder 进程。截图 artifact 只适用于干净、无账号的临时 runner；**不要在有敏感窗口的个人桌面运行**。全屏截图不可保证自动遮蔽外部窗口。artifact 不包含浏览器 profile、账号、cookie、环境变量或凭据。运行取消/超时依赖 runner 的作业清理，artifact 步骤为 always，硬取消仍可能来不及上传。
+finally 终止自己启动的 Chrome，移除临时 HTML 与 profile；不杀其他 Chrome/Finder 进程。截图 artifact 只适用于干净、无账号的临时 runner；**不要在有敏感窗口的个人桌面运行**。全屏截图不可保证自动遮蔽外部窗口。artifact 不包含浏览器 profile、账号、cookie、环境变量或凭据。运行取消/超时依赖 runner 的作业清理，artifact 步骤为 always，硬取消仍可能来不及上传。
 
 ## 本地回归（不安装依赖）
 
