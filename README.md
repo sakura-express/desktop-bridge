@@ -64,6 +64,10 @@ terms apply. Use this for developing and testing Agent Computer.
 
 For a persistent computer on your own host, follow the existing Docker path below.
 
+An independent [experimental macOS native desktop probe / macOS 原生桌面探针](docs/macos-preview.zh-CN.md)
+can be manually run in Actions to investigate runner screenshots and native input.
+It is not a macOS MCP backend or a remote preview; the Linux deployment is unchanged.
+
 ### 1. Start locally (optional self-hosting)
 
 You need Git, Python 3.11+, a running [Docker installation with Compose](https://docs.docker.com/compose/install/),
