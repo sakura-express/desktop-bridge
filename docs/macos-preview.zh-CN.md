@@ -1,11 +1,27 @@
-# 实验性 macOS 原生桌面探针
+# 实验性 macOS MCP preview 与原生桌面探针
 
-这不是 macOS MCP 后端，也不是可远程连接的 preview。现有 Linux Docker/X11、OAuth、只读 viewer 和部署流程不变。此阶段只回答：一次性 GitHub macOS runner 能否截到真实 Chrome 窗口，并通过原生输入产生可验证的网页状态变化。
+**Launch MCP preview** 现在可以选择 macOS runner，启动原生桌面、浏览器、Coding Tools 和带 OAuth 的 HTTPS MCP 服务。独立的 **Experimental macOS native desktop probe** 仍只生成截图和 JSON 证据，不启动 MCP。
+
+## 启动 macOS MCP
+
+1. 将改动推送到默认分支，在仓库 Actions secrets 设置 `BRIDGE_OWNER_TOKEN`（8–256 字符）。
+2. 打开 **Launch MCP preview** → **Run workflow**，`runner` 选择 `macos-26`（ARM64）或 `macos-15-intel`；默认 `ubuntu-latest` 继续使用 Linux Docker。选择 `mode=preview`、`tunnel=quick` 与运行时长。也可用 `mode=verify` 做短时验收，结束后不保留服务。
+3. macOS 安装固定版本 PyObjC 和服务依赖，按 ARM64/Intel 下载并校验固定 SHA-256 的 cloudflared 2026.9.3。无需 Docker、VNC 或下载 Playwright 浏览器。
+4. 先运行单元测试与原生 probe，再启动独立临时 profile 的 headed Chrome（loopback 动态 CDP 端口，通过本次 profile 的 `DevToolsActivePort` 定位）及原生 MCP（loopback 8080）。检查真实服务进程、截图权限和公网 readiness。
+5. 公网验收通过 OAuth/PKCE 获取测试授权，验证 MCP 截图、浏览器、shell 与 PNG WebSocket，并通过 `desktop_action` 验证点击、中文输入、Cmd+A、滚动、拖动的 DOM 结果。通过后重启 MCP 清除测试授权，Job Summary 显示 `/mcp` 和桌面登录 URL。
+
+登录使用既有 owner token；MCP 客户端使用 OAuth。macOS owner viewer 支持点击、拖动、滚动、键盘与粘贴；OAuth viewer 始终只读，服务器拒绝其输入，private takeover 会断开其截图流。截图约每 0.5 秒刷新，不是 VNC 视频流。
+
+`desktop_action` 坐标使用最近全屏截图的像素；服务器按截图尺寸映射 Quartz points，支持 Retina。截图元数据报告实际尺寸。滚轮 `dy` 正数向下；macOS 快捷键使用 `cmd`，如 `["cmd", "a"]`，`ctrl` 保留 Control 含义。单显示器以外、显示几何改变、越界坐标或权限不足会报错。
+
+预览结束或失败会终止本次 Chrome/MCP/隧道，清理临时 profile 和数据；取消或作业超时依靠一次性 runner 清理。下载需要的文件后再结束预览。`macos-preview-preflight-<runner>-<run_id>` artifact 仅包含启动前的 probe 测试证据，不上传交互会话截图、profile 或凭据。
+
+本机跨平台单元测试不能代替远端 macOS 验收。ARM64 与 Intel 各自的服务支持情况以对应 runner 的实际 workflow 结果为准；Finder probe 仍需人工查看图片。
 
 ## 手动运行
 
 1. 自行将本次改动提交并推送到子项目对应的 GitHub 仓库；该 workflow 必须存在于默认分支，Actions 页面才会显示手动运行入口。启用 Actions，打开 **Experimental macOS native desktop probe**。
-2. 点击 **Run workflow**，选择 `macos-15`（ARM64）或 `macos-15-intel`（Intel）。该 workflow 没有 push/PR 触发；每次最多 15 分钟。
+2. 点击 **Run workflow**，选择 `macos-26`（默认 ARM64）、`macos-15`、`macos-15-intel` 或 `macos-26-intel`。该 workflow 没有 push/PR 触发；每次最多 15 分钟。
 3. 下载 `macos-probe-<runner>-<run_id>` artifact（保留 3 天）。本实现没有自动触发 Actions、提交或发布。
 
 使用 checkout/setup-python 的固定 SHA，Python 3.12，Pillow 12.2.0 / Playwright 1.62.0 与项目当前版本一致。PyObjC core、Cocoa、Quartz 固定为 11.1；Quartz 11.1 的 PyPI 元数据明确列出 Python 3.12，提供 `cp312-macosx_10_13_universal2` wheel，支持 Intel/ARM 两种架构[1](https://pypi.org/pypi/pyobjc-framework-Quartz/11.1/json)。这证明 Python/架构包兼容性，不证明 runner 上 TCC、WindowServer、原生输入必然可用。runner 标签、预装 Chrome 和权限策略可能变化。
@@ -36,4 +52,4 @@ finally 终止自己启动的 Chrome，移除临时 HTML 与 profile；不杀其
 python -m unittest discover -s tests -p test_macos_probe.py -v
 ```
 
-测试仅依赖标准库，覆盖非 macOS 拒绝与非零退出、失败报告、坐标密度/独立轴缩放/边界、色标容差/杂色/缺失/歧义。不得把 Windows 上这些测试通过描述成 macOS 桌面验证通过。需要手动运行两个 runner 的 workflow 并审阅 artifact 后，才能评估下一阶段原生 backend；当前不承诺 MCP、远程 viewer、权限隔离或 session 生命周期适配完成。
+probe 测试仅依赖标准库，覆盖非 macOS 拒绝与非零退出、失败报告、坐标密度/独立轴缩放/边界、色标容差/杂色/缺失/歧义。不得把 Windows 上这些测试通过描述成 macOS 桌面验证通过。MCP backend、viewer 与生命周期另由 Launch MCP preview 的单元测试、公网 MCP 输入断言和远端运行验证。

@@ -245,3 +245,68 @@ def test_private_websocket_cancellation_finishes_cleanup(app, monkeypatch, phase
         assert completed == ["tasks", "close", "writer"]
         assert forwarding_tasks and all(task.done() for task in forwarding_tasks)
         assert not app.state.runtime.session.sockets
+
+
+class FakeNativeDesktop(FakeDesktop):
+    transport = "native"
+    size = (2048, 1536)
+
+    async def screenshot(self):
+        return b"\x89PNG\r\n\x1a\nfixture"
+
+
+@pytest.fixture
+def native_app(tmp_path):
+    runtime = Runtime(tmp_path, desktop=FakeNativeDesktop(), browser=FakeBrowser(),
+                      coding=FakeCoding())
+    return create_app(tmp_path, TOKEN, "http://testserver", runtime)
+
+
+def test_native_oauth_viewer_rejects_json_input(native_app):
+    with TestClient(native_app) as client:
+        token = oauth(client)
+        assert redeem(client, ticket(client, token)).status_code == 200
+        state = client.get("/api/viewer/status").json()
+        assert state["desktop_transport"] == "native"
+        assert state["resolution"] == {"width": 2048, "height": 1536}
+        with client.websocket_connect("/desktop/oauth/view", headers={"Origin": "http://testserver"}) as ws:
+            assert ws.receive_bytes().startswith(b"\x89PNG")
+            ws.send_json({"kind": "click", "x": 10, "y": 20})
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_bytes()
+        assert native_app.state.runtime.desktop.calls == 0
+
+
+@pytest.mark.parametrize("reason", ["revoke", "private", "expire"])
+def test_native_frames_stop_after_authorization_change(native_app, reason):
+    with TestClient(native_app) as client:
+        token = oauth(client)
+        assert redeem(client, ticket(client, token)).status_code == 200
+        with client.websocket_connect("/desktop/oauth/view", headers={"Origin": "http://testserver"}) as ws:
+            assert ws.receive_bytes().startswith(b"\x89PNG")
+            if reason == "private":
+                client.portal.call(native_app.state.runtime.control, "private")
+            elif reason == "expire":
+                native_app.state.auth.tokens[digest(token)] = 0
+            else:
+                native_app.state.auth.revoke()
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_bytes()
+        assert not native_app.state.runtime.session.sockets
+
+
+def test_native_owner_control_requires_human_mode_and_revokes_on_transition(native_app):
+    with TestClient(native_app) as client:
+        headers = login(client)
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/desktop/control", headers={"Origin": "http://testserver"}):
+                pytest.fail("Control accepted in READY")
+        assert client.post("/api/control/human", headers=headers).status_code == 200
+        with client.websocket_connect("/desktop/control", headers={"Origin": "http://testserver"}) as ws:
+            ws.receive_bytes()
+            ws.send_json({"kind": "click", "x": 1500, "y": 1000})
+            ws.receive_bytes()
+            assert native_app.state.runtime.desktop.calls == 1
+            assert client.post("/api/control/agent", headers=headers).status_code == 200
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_bytes()

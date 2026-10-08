@@ -82,9 +82,8 @@ class PreviewDesktop:
         chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
         if not chrome.is_file():
             raise RuntimeError("Runner Google Chrome executable missing")
-        for port in (8080, 9222):
-            with socket.socket() as sock:
-                sock.bind(("127.0.0.1", port))
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 8080))
         self.directory = tempfile.TemporaryDirectory(prefix="bridge-macos-")
         root = Path(self.directory.name)
         # Service processes do not inherit runner credentials or tunnel tokens.
@@ -94,9 +93,21 @@ class PreviewDesktop:
                         BRIDGE_DATA=str(root / "data"))
         self.chrome = subprocess.Popen(
             [str(chrome), f"--user-data-dir={root / 'chrome'}",
-             "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=9222",
+             "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
              "--no-first-run", "--no-default-browser-check", "about:blank"],
             env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        from macos_probe import ProbeError, read_devtools_active_port
+
+        for _ in range(60):
+            if self.chrome.poll() is not None:
+                raise RuntimeError("Own Chrome process exited before CDP readiness")
+            try:
+                self.env["BRIDGE_CDP_ENDPOINT"] = read_devtools_active_port(root / "chrome")
+                break
+            except ProbeError:
+                time.sleep(.5)
+        else:
+            raise RuntimeError("Own Chrome DevToolsActivePort did not become ready")
         self._start_service()
 
     def _start_service(self):
@@ -198,7 +209,8 @@ def main():
                 raise RuntimeError("Public HTTPS readiness failed; check named hostname routing to http://127.0.0.1:8080")
         # A working health check is insufficient. Verify discovery, PKCE, JSON MCP,
         # actual tools and authenticated desktop WebSocket across the public tunnel.
-        smoke(base, owner, native_pid=desktop.chrome.pid if desktop.chrome else None)
+        smoke(base, owner, native_pid=desktop.chrome.pid if desktop.chrome else None,
+              native_endpoint=desktop.env.get("BRIDGE_CDP_ENDPOINT"))
         if mode == "verify":
             summary("Public Cloudflare HTTPS smoke test passed. Disposable test session is now shutting down; this is not a user login URL.")
             return

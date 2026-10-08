@@ -1,0 +1,72 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const test = require('node:test');
+const source = fs.readFileSync(path.join(__dirname, '../src/desktop_bridge/static/native-screen.js'), 'utf8');
+
+function harness() {
+  const image = new EventTarget();
+  Object.assign(image, {style:{}, naturalWidth:2000, naturalHeight:1000,
+    getBoundingClientRect:()=>({left:0,top:0,width:800,height:600}),
+    setPointerCapture(){}});
+  const target = new EventTarget();
+  Object.assign(target, {getAttribute:()=>null, removeAttribute(){}, replaceChildren(){}, focus(){}});
+  class Socket {
+    static OPEN = 1;
+    readyState = 1;
+    messages = [];
+    send(value){this.messages.push(JSON.parse(value));}
+    close(){this.closed=true;}
+  }
+  const revoked = [];
+  const context = vm.createContext({EventTarget, Event, Blob, WebSocket:Socket,
+    document:{createElement:()=>image},
+    URL:{createObjectURL:()=> 'blob:test', revokeObjectURL:value=>revoked.push(value)}});
+  vm.runInContext(source.replace('export default class NativeScreen', 'globalThis.NativeScreen = class NativeScreen'), context);
+  const screen = new context.NativeScreen(target, 'ws://test/desktop/view');
+  function emit(element, kind, properties={}) {
+    const event = new Event(kind, {cancelable:true});
+    Object.assign(event, properties);
+    element.dispatchEvent(event);
+  }
+  return {screen,image,target,emit,revoked};
+}
+
+test('native viewer sends no input until owner control is enabled', () => {
+  const h = harness();
+  h.emit(h.image, 'pointerdown', {clientX:200,clientY:150,button:0,pointerId:1});
+  h.emit(h.image, 'pointerup', {clientX:200,clientY:150,button:0});
+  h.screen.send({kind:'type',text:'blocked'});
+  assert.equal(h.screen.socket.messages.length, 0);
+});
+
+test('native owner coordinates account for image pixels and letterboxing', () => {
+  const h = harness(); h.screen.viewOnly = false;
+  h.emit(h.image, 'pointerdown', {clientX:200,clientY:150,button:2,pointerId:1});
+  h.emit(h.image, 'pointerup', {clientX:200,clientY:150,button:2});
+  assert.deepEqual(h.screen.socket.messages[0], {kind:'click',x:500,y:125,button:'right'});
+  h.emit(h.image, 'pointerdown', {clientX:200,clientY:50,button:0,pointerId:2});
+  h.emit(h.image, 'pointerup', {clientX:200,clientY:50,button:0});
+  assert.equal(h.screen.socket.messages.length, 1);
+});
+
+test('native owner sends command keys and unicode clipboard text', () => {
+  const h = harness(); h.screen.viewOnly = false;
+  h.emit(h.target, 'keydown', {key:'a',metaKey:true});
+  h.emit(h.target, 'paste', {clipboardData:{getData:()=> '中文输入'}});
+  assert.deepEqual(h.screen.socket.messages, [{kind:'key',keys:['cmd','a']}, {kind:'type',text:'中文输入'}]);
+});
+
+test('native reconnect cleanup revokes pixels and removes input listeners', () => {
+  const h = harness(); h.screen.viewOnly = false;
+  let connected = 0;
+  h.screen.addEventListener('connect', () => connected++);
+  h.screen.socket.onmessage({data:new Blob(['png'])});
+  assert.equal(connected, 1);
+  h.screen.disconnect();
+  h.emit(h.target, 'keydown', {key:'a'});
+  assert.equal(h.screen.socket.messages.length, 0);
+  assert.equal(h.screen.socket.closed, true);
+  assert.deepEqual(h.revoked, ['blob:test']);
+});

@@ -64,9 +64,12 @@ terms apply. Use this for developing and testing Agent Computer.
 
 For a persistent computer on your own host, follow the existing Docker path below.
 
-An independent [experimental macOS native desktop probe / macOS 原生桌面探针](docs/macos-preview.zh-CN.md)
-can be manually run in Actions to investigate runner screenshots and native input.
-It is not a macOS MCP backend or a remote preview; the Linux deployment is unchanged.
+**Launch MCP preview** also offers experimental native macOS runners: `macos-26`
+(ARM64) and `macos-15-intel`. They run the OAuth MCP service, native screenshot/input,
+headed Chrome and a PNG desktop viewer without Docker. Each launch verifies real
+input through public MCP before publishing the session. See the
+[macOS preview guide / macOS 预览指南](docs/macos-preview.zh-CN.md).
+The independent native desktop probe remains available for screenshot/JSON evidence.
 
 ### 1. Start locally (optional self-hosting)
 

@@ -100,7 +100,8 @@ class Runtime:
                 self.desktop = Desktop()
             else:
                 raise ValueError("BRIDGE_DESKTOP_BACKEND must be vnc or macos")
-        self.browser = self.browser or Browser()
+        self.browser = self.browser or Browser(
+            os.environ.get("BRIDGE_CDP_ENDPOINT", "http://127.0.0.1:9222"))
         self.coding = self.coding or Coding(self.workspace)
         await self.browser.connect()
         await self.coding.connect()

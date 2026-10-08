@@ -75,3 +75,35 @@ def test_native_preview_detects_dead_process():
     desktop.service.poll.return_value = 1
     with pytest.raises(RuntimeError, match="exited"):
         desktop.check()
+
+
+def test_native_start_uses_own_dynamic_cdp_and_filters_runner_secrets(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, Mock
+
+    chrome, service = Mock(), Mock()
+    chrome.poll.return_value = None
+    popen = Mock(side_effect=[chrome, service])
+    endpoint = "ws://127.0.0.1:12345/devtools/browser/test-only"
+    discover = Mock(return_value=endpoint)
+    monkeypatch.setitem(preview.sys.modules, "macos_probe", SimpleNamespace(
+        ProbeError=RuntimeError, read_devtools_active_port=discover))
+    monkeypatch.setattr(preview.sys, "platform", "darwin")
+    monkeypatch.setattr(preview.Path, "is_file", lambda _: True)
+    monkeypatch.setattr(preview.subprocess, "Popen", popen)
+    monkeypatch.setattr(preview.socket, "socket", MagicMock())
+    desktop = preview.PreviewDesktop("macos")
+    try:
+        desktop.start({"PATH": "test-path", "BRIDGE_OWNER_TOKEN": "test-owner",
+                       "BRIDGE_PUBLIC_URL": "https://bridge.test",
+                       "TUNNEL_TOKEN": "secret", "GITHUB_TOKEN": "secret"})
+        args = popen.call_args_list[0].args[0]
+        assert "--remote-debugging-port=0" in args
+        env = popen.call_args_list[1].kwargs["env"]
+        assert env["BRIDGE_CDP_ENDPOINT"] == endpoint
+        assert env["BRIDGE_DESKTOP_BACKEND"] == "macos"
+        assert env["BRIDGE_BIND"] == "127.0.0.1"
+        assert "TUNNEL_TOKEN" not in env and "GITHUB_TOKEN" not in env
+        assert discover.call_args.args[0] == preview.Path(desktop.directory.name) / "chrome"
+    finally:
+        desktop.close()

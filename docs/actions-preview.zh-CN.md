@@ -1,11 +1,15 @@
 # GitHub Actions → Cloudflare Tunnel → ChatGPT
 
-这是 Agent Computer 的按需开发/测试入口：Actions 启动真实 Docker 桌面，
+这是 Agent Computer 的按需开发/测试入口：Actions 启动 Linux Docker 或原生 macOS 桌面，
 Cloudflare 提供 HTTPS 地址，ChatGPT 通过 OAuth + Streamable HTTP 调用桌面、
 浏览器、文件和终端工具。无需 OpenAI API key；模型由你的 ChatGPT 客户端提供。
 
 默认就绪后运行 60 分钟，结束或取消后会删除电脑、文件和浏览器状态，请提前下载结果。
 这是限时开发/测试体验；用量受 GitHub 账户配额与 Actions 条款约束。
+
+## macOS runner 选择
+
+在 **Launch MCP preview** 的 `runner` 输入选择 `macos-26`（ARM64）或 `macos-15-intel`（Intel），可启动原生 macOS MCP 服务；默认 `ubuntu-latest` 使用 Linux Docker。macOS 沿用下文的 owner token、OAuth、quick/named 隧道和运行时长设置。截图与输入使用原生 API，viewer 使用 PNG WebSocket。详见 [macOS preview](macos-preview.zh-CN.md)。
 
 ## 最短路径：临时地址
 

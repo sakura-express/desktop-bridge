@@ -83,7 +83,7 @@ jobs:
       - name: Verify native macOS desktop before publishing MCP
         if: runner.os == 'macOS'
         run: |
-          python -m pytest tests/test_macos_probe.py tests/test_macos_backend.py tests/test_preview.py -q
+          python -m pytest tests/test_macos_probe.py tests/test_macos_backend.py tests/test_preview.py tests/test_app.py tests/test_oauth_viewer.py -q
           python scripts/macos_probe.py --output macos-probe-artifacts
       - name: Build desktop
         if: runner.os == 'Linux'

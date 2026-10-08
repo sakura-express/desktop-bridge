@@ -9,7 +9,7 @@ import httpx
 from websockets.sync.client import connect
 
 
-def smoke(base, owner, *, native_pid=None):
+def smoke(base, owner, *, native_pid=None, native_endpoint=None):
     with httpx.Client(base_url=base, timeout=45, follow_redirects=False) as http:
         denied = http.post("/mcp", json={})
         assert denied.status_code == 401
@@ -77,7 +77,7 @@ def smoke(base, owner, *, native_pid=None):
         assert any(item["type"] == "image" for item in shot["content"])
         assert not rpc("tools/call", {"name": "browser_snapshot", "arguments": {}}).get("isError")
         if native_pid is not None:
-            native_actions(rpc, native_pid)
+            native_actions(rpc, native_pid, native_endpoint)
         command = rpc("tools/call", {"name": "coding_exec_command", "arguments": {
             "cmd": "printf tunnel-ready", "yield_time_ms": 1000, "bridge_action_id": "public-tunnel-smoke",
         }})
@@ -94,15 +94,16 @@ def smoke(base, owner, *, native_pid=None):
     print("PASS public HTTPS: OAuth discovery, PKCE, JSON MCP, real screenshot/browser/shell, desktop WebSocket, revocation", flush=True)
 
 
-def native_actions(rpc, pid):
+def native_actions(rpc, pid, endpoint):
     """Verify the actual MCP adapter's input against DOM and captured color markers."""
     import io
     import json
-    import threading
-    from http.server import ThreadingHTTPServer
+    import tempfile
+    import time
+    from pathlib import Path
 
     from AppKit import NSRunningApplication
-    from macos_probe import MARKERS, TestPage, axis_mapping, find_marker
+    from macos_probe import MARKERS, axis_mapping, find_marker, prepare_fixture
     from PIL import Image
     from playwright.sync_api import sync_playwright
 
@@ -114,28 +115,27 @@ def native_actions(rpc, pid):
     def metadata(result):
         return json.loads(next(item["text"] for item in result["content"] if item["type"] == "text"))
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), TestPage)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    page = None
-    try:
-        url = f"http://127.0.0.1:{server.server_port}/"
-        observation = metadata(call("browser_snapshot"))["observation_id"]
-        call("browser_action", {"action": {"kind": "new_tab", "url": url},
-                                "observation_id": observation, "action_id": secrets.token_hex(16)})
+    with tempfile.TemporaryDirectory(prefix="bridge-mcp-fixture-") as directory:
+        _, url = prepare_fixture(Path(directory))
         with sync_playwright() as pw:
-            browser = pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
-            page = next(p for context in browser.contexts for p in context.pages if p.url == url)
+            browser = pw.chromium.connect_over_cdp(endpoint)
+            # Prepare a local test tab; all verified input goes through public MCP.
+            page = browser.contexts[0].new_page()
+            page.goto(url)
+            page.bring_to_front()
             app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
             assert app is not None and app.activateWithOptions_(2), "Chrome activation failed"
             page.wait_for_selector("#a")
 
             def act(action, selector=None, end=None):
+                assert app.activateWithOptions_(2), "Chrome activation failed"
+                time.sleep(.2)
+                assert app.isActive(), "Own Chrome is not foreground"
                 shot = call("desktop_screenshot")
                 data = next(item["data"] for item in shot["content"] if item["type"] == "image")
                 with Image.open(io.BytesIO(base64.b64decode(data))) as image:
                     image = image.convert("RGB")
-                    screen = [find_marker(image.getdata(), *image.size, color)
+                    screen = [find_marker(image.get_flattened_data(), *image.size, color)
                               for color in MARKERS.values()]
                 boxes = [page.locator(f"#{key}").bounding_box() for key in MARKERS]
                 mapping = axis_mapping([(b["x"] + b["width"] / 2, b["y"] + b["height"] / 2)
@@ -168,10 +168,5 @@ def native_actions(rpc, pid):
             act({"kind": "drag"}, "#drag", "#drop")
             page.wait_for_function("probe.drag && probe.dragMoves > 0")
             page.close()
-            page = None
         print("PASS native macOS input via public MCP: click, Chinese paste, Cmd+A, scroll, drag",
               flush=True)
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
