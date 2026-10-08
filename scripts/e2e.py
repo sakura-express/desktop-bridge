@@ -7,6 +7,7 @@ The model is deliberately not part of this deterministic integration test.
 import argparse
 import asyncio
 import base64
+import contextlib
 import hashlib
 import io
 import json
@@ -533,32 +534,200 @@ async def run(restart):
                         )
                         await browser({"kind": "click", "role": "textbox", "name": "Project note"})
 
-                        async def inject(channel):
+                        @contextlib.asynccontextmanager
+                        async def probe(channel):
                             await page.evaluate(
                                 """async (channel) => {
-                              const {default:RFB}=await import('/novnc/core/rfb.js');
-                              const node=document.createElement('div');document.body.append(node);
-                              await new Promise((resolve,reject)=>{
-                                const r=new RFB(node,`ws://${location.host}/desktop/${channel}`);
-                                r.viewOnly=false;
-                                const timer=setTimeout(()=>{r.disconnect();reject(new Error('VNC handshake timeout'));},5000);
-                                r.addEventListener('connect',()=>{
-                                  r.sendKey(0x7a,'KeyZ');
-                                  setTimeout(()=>{clearTimeout(timer);r.disconnect();node.remove();resolve();},300);
-                                });
+                              const {default:RFB} = await import('/novnc/core/rfb.js');
+                              if (window.__bridgeVncProbe) {
+                                try { window.__bridgeVncProbe.cleanup(); } catch (_) {}
+                              }
+                              const node = document.createElement('div');
+                              document.body.append(node);
+                              await new Promise((resolve, reject) => {
+                                let settled = false;
+                                const r = new RFB(node, `ws://${location.host}/desktop/${channel}`);
+                                r.viewOnly = false;
+                                const onSecurityFailure = (e) => {
+                                  if (settled) return;
+                                  settled = true;
+                                  cleanup(new Error('VNC security failure: ' + (e && e.detail ? e.detail.status : 'unknown')));
+                                };
+                                const onDisconnect = (e) => {
+                                  if (!settled) {
+                                    settled = true;
+                                    cleanup(new Error('VNC disconnected during handshake: ' + (e && e.detail && e.detail.clean ? 'clean' : 'unclean')));
+                                  } else if (window.__bridgeVncProbe) {
+                                    window.__bridgeVncProbe.disconnected = true;
+                                    window.__bridgeVncProbe.disconnectDetail = e && e.detail;
+                                  }
+                                };
+                                const timer = setTimeout(() => {
+                                  if (settled) return;
+                                  settled = true;
+                                  cleanup(new Error('VNC handshake timeout'));
+                                }, 5000);
+                                function cleanup(err) {
+                                  clearTimeout(timer);
+                                  r.removeEventListener('securityfailure', onSecurityFailure);
+                                  r.removeEventListener('disconnect', onDisconnect);
+                                  try { r.disconnect(); } catch (_) {}
+                                  try { node.remove(); } catch (_) {}
+                                  if (window.__bridgeVncProbe) delete window.__bridgeVncProbe;
+                                  reject(err);
+                                }
+                                r.addEventListener('securityfailure', onSecurityFailure);
+                                r.addEventListener('disconnect', onDisconnect);
+                                r.addEventListener('connect', () => {
+                                  if (settled) return;
+                                  settled = true;
+                                  clearTimeout(timer);
+                                  let sentCount = 0;
+                                  window.__bridgeVncProbe = {
+                                    r,
+                                    node,
+                                    disconnected: false,
+                                    sendKey: () => {
+                                      if (window.__bridgeVncProbe.disconnected) {
+                                        throw new Error('Cannot sendKey: VNC probe disconnected unexpectedly');
+                                      }
+                                      if (sentCount > 0) {
+                                        throw new Error('Key already sent; re-sending not allowed');
+                                      }
+                                      sentCount++;
+                                      r.sendKey(0x7a, 'KeyZ');
+                                    },
+                                    cleanup: () => {
+                                      r.removeEventListener('securityfailure', onSecurityFailure);
+                                      r.removeEventListener('disconnect', onDisconnect);
+                                      try { r.disconnect(); } catch (_) {}
+                                      try { node.remove(); } catch (_) {}
+                                      delete window.__bridgeVncProbe;
+                                    }
+                                  };
+                                  resolve();
+                                }, { once: true });
                               });
                             }""",
                                 channel,
                             )
+                            try:
+                                yield
+                            finally:
+                                await page.evaluate(
+                                    """() => {
+                                      if (window.__bridgeVncProbe) {
+                                        try { window.__bridgeVncProbe.cleanup(); } catch (_) {}
+                                        delete window.__bridgeVncProbe;
+                                      }
+                                    }"""
+                                )
 
-                        await inject("view")
-                        snap = unpack(await call("browser_snapshot"))
-                        assert "VIEW_ONLYz" not in snap["snapshot"], snap
+                        async def setup_remote_note_focus():
+                            await headed_fixture("""
+                                demo_page = next((p for p in context.pages if p.url == "http://127.0.0.1:8080/static/demo.html"), None)
+                                assert demo_page is not None, f"Demo page not found among {[p.url for p in context.pages]}"
+                                await demo_page.bring_to_front()
+                                await demo_page.locator("#note").click()
+                                diag = await demo_page.evaluate('''() => {
+                                    const el = document.querySelector('#note');
+                                    return {
+                                        active: document.activeElement === el,
+                                        value: el ? el.value : null,
+                                        url: location.href
+                                    };
+                                }''')
+                                assert diag["active"] is True, f"Focus setup failed (not active): {diag}"
+                                assert diag["value"] == "VIEW_ONLY", f"Focus setup failed (value not VIEW_ONLY): {diag}"
+                            """)
+
+                        async def send_probe_key():
+                            await page.evaluate(
+                                """() => {
+                                  if (!window.__bridgeVncProbe) throw new Error('No active VNC probe');
+                                  window.__bridgeVncProbe.sendKey();
+                                }"""
+                            )
+
+                        async def monitor_view_note():
+                            return await headed_fixture("""
+                                demo_page = next((p for p in context.pages if p.url == "http://127.0.0.1:8080/static/demo.html"), None)
+                                assert demo_page is not None
+                                import time, json
+                                start = time.monotonic()
+                                diag = None
+                                while time.monotonic() - start < 1.1:
+                                    diag = await demo_page.evaluate('''() => {
+                                        const el = document.querySelector('#note');
+                                        return {
+                                            value: el ? el.value : null,
+                                            activeElement: el ? (document.activeElement === el ? 'note' : (document.activeElement ? document.activeElement.tagName : 'none')) : 'none',
+                                            hasFocus: document.hasFocus(),
+                                            url: location.href
+                                        };
+                                    }''')
+                                    if diag["value"] != "VIEW_ONLY":
+                                        break
+                                    await asyncio.sleep(0.05)
+                                print(json.dumps(diag))
+                            """)
+
+                        async def wait_control_note():
+                            return await headed_fixture("""
+                                demo_page = next((p for p in context.pages if p.url == "http://127.0.0.1:8080/static/demo.html"), None)
+                                assert demo_page is not None
+                                import json
+                                ok = True
+                                try:
+                                    await demo_page.wait_for_function(
+                                        "() => { const el = document.querySelector('#note'); return el && el.value === 'VIEW_ONLYz'; }",
+                                        timeout=5000
+                                    )
+                                except Exception:
+                                    ok = False
+                                diag = await demo_page.evaluate('''() => {
+                                    const el = document.querySelector('#note');
+                                    return {
+                                        value: el ? el.value : null,
+                                        activeElement: el ? (document.activeElement === el ? 'note' : (document.activeElement ? document.activeElement.tagName : 'none')) : 'none',
+                                        hasFocus: document.hasFocus(),
+                                        url: location.href
+                                    };
+                                }''')
+                                diag["ok"] = ok
+                                print(json.dumps(diag))
+                            """)
+
+                        async with probe("view"):
+                            await setup_remote_note_focus()
+                            await send_probe_key()
+                            view_diag = await monitor_view_note()
+                            probe_state = await page.evaluate(
+                                "() => window.__bridgeVncProbe ? {disconnected: window.__bridgeVncProbe.disconnected} : {disconnected: true}"
+                            )
+                            assert not probe_state.get("disconnected"), f"View probe disconnected unexpectedly: {probe_state}"
+                            assert view_diag["value"] == "VIEW_ONLY", f"View probe allowed note value change: {view_diag}"
+                            snap = unpack(await call("browser_snapshot"))
+                            assert "VIEW_ONLYz" not in snap["snapshot"], (view_diag, snap)
+                            assert view_diag["value"] == "VIEW_ONLY", (view_diag, snap)
+
                         await page.get_by_role("button", name="Take control", exact=True).click()
                         await page.locator("#status").filter(has_text="HUMAN").wait_for()
-                        await inject("control")
-                        snap = unpack(await call("browser_snapshot"))
-                        assert "VIEW_ONLYz" in snap["snapshot"], snap
+                        await page.locator('#screen[data-connected="true"]').wait_for()
+
+                        async with probe("control"):
+                            await setup_remote_note_focus()
+                            await send_probe_key()
+                            control_diag = await wait_control_note()
+                            probe_state = await page.evaluate(
+                                "() => window.__bridgeVncProbe ? {disconnected: window.__bridgeVncProbe.disconnected} : {disconnected: true}"
+                            )
+                            assert not probe_state.get("disconnected"), f"Control probe disconnected unexpectedly: {probe_state}"
+                            assert control_diag["ok"] is True, f"Control probe input timed out / failed: {control_diag}"
+                            assert control_diag["value"] == "VIEW_ONLYz", f"Unexpected note value: {control_diag}"
+                            snap = unpack(await call("browser_snapshot"))
+                            assert "VIEW_ONLYz" in snap["snapshot"], (control_diag, snap)
+
                         await page.get_by_role("button", name="Hand back to AI").click()
                         await page.locator("#status").filter(has_text="AGENT").wait_for()
                         await page.locator('#screen[data-connected="true"]').wait_for()
