@@ -23,7 +23,7 @@ on:
         default: ''
   push:
     branches: [main]
-    paths: ['.github/workflows/preview.yml', 'scripts/preview.py', 'scripts/tunnel_smoke.py']
+    paths: ['.github/workflows/preview.yml', 'scripts/preview.py', 'scripts/tunnel_smoke.py', 'scripts/desktop_smoke.py', 'Dockerfile', 'docker/**']
 permissions:
   contents: read
 concurrency:
@@ -60,6 +60,17 @@ jobs:
           pip install 'httpx==0.28.1' 'websockets==15.0.1'
       - name: Build desktop
         run: docker build -t desktop-bridge:preview .
+      - name: Verify desktop survives closing the browser
+        run: |
+          cleanup() { docker rm -fv bridge-desktop-smoke >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker run -d --name bridge-desktop-smoke --shm-size=1g \
+            -e BRIDGE_OWNER_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')" \
+            -e BRIDGE_PUBLIC_URL=http://localhost:8080 desktop-bridge:preview
+          if ! docker exec -i bridge-desktop-smoke python - < scripts/desktop_smoke.py; then
+            docker logs --tail 100 bridge-desktop-smoke
+            exit 1
+          fi
       - name: Start authenticated HTTPS MCP preview
         env:
           BRIDGE_OWNER_TOKEN: ${{ github.event_name == 'workflow_dispatch' && secrets.BRIDGE_OWNER_TOKEN || '' }}

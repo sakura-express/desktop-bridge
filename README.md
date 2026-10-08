@@ -37,6 +37,9 @@ ChatGPT → OAuth + MCP → Agent Computer
 
 You run the computer. ChatGPT supplies the model, plans the task, and calls its tools. The server provides the desktop and execution environment; it has no background model loop or scheduler. When the client stops calling tools, the server does not continue reasoning on its own.
 
+The container runs a lightweight XFCE desktop with a taskbar, application menu,
+workspace file manager and terminal. Closing Chromium reveals the desktop; the
+**Web Browser** desktop icon reopens the same CDP-enabled browser profile.
 Browser automation and desktop control use the same visible Chromium session. With Docker self-hosting, files live in `/data/workspace` on a persistent volume. GitHub Actions preview files are temporary. Other MCP clients can connect if they support Streamable HTTP and the required OAuth flow; account-specific compatibility still needs testing.
 
 ## Get started
@@ -60,6 +63,10 @@ Download results first. URLs change between runs; account quotas and GitHub Acti
 terms apply. Use this for developing and testing Agent Computer.
 
 For a persistent computer on your own host, follow the existing Docker path below.
+
+An independent [experimental macOS native desktop probe / macOS 原生桌面探针](docs/macos-preview.zh-CN.md)
+can be manually run in Actions to investigate runner screenshots and native input.
+It is not a macOS MCP backend or a remote preview; the Linux deployment is unchanged.
 
 ### 1. Start locally (optional self-hosting)
 

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Web Browser
+Name[zh_CN]=浏览器
+Comment=Open Chromium with the MCP browser connection
+Exec=/usr/local/bin/start-browser
+Icon=chromium
+Terminal=false
+Categories=Network;WebBrowser;
+StartupNotify=true

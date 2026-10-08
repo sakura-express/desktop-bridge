@@ -40,6 +40,24 @@ ChatGPT 中是否显示创建连接入口取决于账户、工作区权限和当
 按照 [OpenAI 接入文档](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt)
 完成连接。协议烟测不等于已经替你完成 ChatGPT 账户内的连接验证。
 
+## 真实桌面与关闭浏览器
+
+镜像包含轻量 XFCE 桌面：背景、桌面图标、应用菜单和任务栏；它是实际的 Linux
+桌面会话，不是网页模拟桌面。默认仍自动打开 Chromium，关闭浏览器后桌面继续运行，
+不再只剩黑屏，也不会因正常关闭而自动重开浏览器。
+
+- 双击桌面的 **Web Browser / 浏览器** 可重新打开同一个 Chromium profile，
+  保留 MCP 浏览器连接所需的 CDP 端口。浏览器关闭期间浏览器专用工具不可用，
+  桌面截图、鼠标键盘、文件和终端工具仍可使用。
+- **Workspace Files / 工作区文件** 打开 `/data/workspace`；**Terminal / 终端**
+  在该工作区打开 shell。任务栏可切换窗口，应用菜单可启动已安装的程序。
+- 桌面没有额外暴露端口，继续通过现有鉴权网页和 MCP 访问；不提供宿主机桌面。
+- 更新代码后需要重新运行 **Launch MCP preview** 构建新镜像；已运行的旧会话不会热更新。
+  重新运行前先下载旧会话中的文件。
+
+workflow 在公开预览前检查：正常关闭 Chromium 后桌面和任务栏仍显示，且不会自动重开；
+再通过实际桌面启动器重开 Chromium，确认 CDP 恢复。这个检查独立于后续 OAuth/MCP 烟测。
+
 ## 固定地址：Named Tunnel（可选）
 
 如果不想每次重填随机地址，使用你自己 Cloudflare 账号中的专用 Named Tunnel：

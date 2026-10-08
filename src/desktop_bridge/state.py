@@ -122,11 +122,13 @@ class Session:
             if row:
                 if row[0] != fingerprint:
                     raise BridgeError(
-                        "IDEMPOTENCY_CONFLICT", "action_id was used for another action"
+                        "IDEMPOTENCY_CONFLICT",
+                        "action_id was used for another action. Recovery: generate a brand-new unique action_id for this action.",
                     )
                 if row[1] != "done":
                     raise BridgeError(
-                        "OUTCOME_UNKNOWN", "Do not replay: inspect external state first"
+                        "OUTCOME_UNKNOWN",
+                        "Do not replay: action state is unknown. Recovery: take a fresh snapshot and inspect external state before deciding next step.",
                     )
                 yield {"cached": json.loads(row[2])}
                 return
@@ -139,7 +141,8 @@ class Session:
                     or time.monotonic() - observed.at > self.observation_ttl
                 ):
                     raise BridgeError(
-                        "STALE_OBSERVATION", "Take a fresh screenshot or browser snapshot"
+                        "STALE_OBSERVATION",
+                        "Observation is stale (TTL 30s or invalidated by prior action/epoch change). Recovery: call browser_snapshot or desktop_screenshot for a fresh observation_id before acting.",
                     )
             self.db.execute(
                 "INSERT INTO receipts VALUES (?,?, 'running',NULL,?)",
