@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import anyio
 import pytest
+from anyio.lowlevel import checkpoint
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 from test_app import TOKEN, FakeBrowser, FakeCoding, FakeDesktop, login
@@ -223,7 +224,7 @@ def test_private_websocket_cancellation_finishes_cleanup(app, monkeypatch, phase
         request_scopes[-1].cancel()
         # Deliver request cancellation while cleanup is suspended, then allow
         # shielded cleanup to finish. No wall-clock timing is needed.
-        await anyio.sleep(0)
+        await checkpoint()
         release.set()
 
     monkeypatch.setattr(app_module.asyncio, "open_connection", open_connection)
