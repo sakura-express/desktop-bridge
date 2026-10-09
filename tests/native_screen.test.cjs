@@ -6,7 +6,12 @@ const test = require('node:test');
 const source = fs.readFileSync(path.join(__dirname, '../src/desktop_bridge/static/native-screen.js'), 'utf8');
 
 function harness() {
-  const image = new EventTarget();
+  function element() {
+    return Object.assign(new EventTarget(), {style:{}, setAttribute(){}, append(){},
+      getBoundingClientRect:()=>({left:0,top:0,width:800,height:600}),
+      animate(){return {cancel(){this.cancelled=true;}};}});
+  }
+  const image = element();
   Object.assign(image, {style:{}, naturalWidth:2000, naturalHeight:1000,
     getBoundingClientRect:()=>({left:0,top:0,width:800,height:600}),
     setPointerCapture(){}});
@@ -21,7 +26,7 @@ function harness() {
   }
   const revoked = [];
   const context = vm.createContext({EventTarget, Event, Blob, WebSocket:Socket,
-    document:{createElement:()=>image},
+    document:{createElement:tag=>tag==='img'?image:element()},
     URL:{createObjectURL:()=> 'blob:test', revokeObjectURL:value=>revoked.push(value)}});
   vm.runInContext(source.replace('export default class NativeScreen', 'globalThis.NativeScreen = class NativeScreen'), context);
   const screen = new context.NativeScreen(target, 'ws://test/desktop/view');
@@ -75,4 +80,39 @@ test('Windows viewer maps the Meta modifier to the native Windows key', () => {
   const h = harness(); h.screen.viewOnly = false; h.screen.platform = 'windows';
   h.emit(h.target, 'keydown', {key:'ArrowLeft',metaKey:true});
   assert.deepEqual(h.screen.socket.messages, [{kind:'key',keys:['win','left']}]);
+});
+
+test('cursor events align with letterboxed image and distinguish AI drag and right click', () => {
+  const h = harness();
+  const packet = {type:'cursor',seq:1,kind:'move',x:500,y:125,width:2000,height:1000,actor:'ai'};
+  h.screen.socket.onmessage({data:JSON.stringify(packet)});
+  assert.equal(h.screen.cursor.hidden, false);
+  assert.equal(h.screen.cursor.style.left, '198px');
+  assert.equal(h.screen.cursor.style.top, '148px');
+  assert.equal(h.screen.cursorLabel.textContent, 'AI');
+  h.screen.receiveCursor({...packet,seq:2,kind:'down',button:'right',pressed:'right'});
+  assert.equal(h.screen.cursorLabel.textContent, 'AI · Right click');
+  assert.equal(h.screen.animations.size, 1);
+  h.screen.receiveCursor({...packet,seq:3,kind:'move',pressed:'right'});
+  assert.equal(h.screen.cursorLabel.textContent, 'AI · Drag');
+  h.screen.receiveCursor({...packet,seq:4,kind:'up',pressed:null});
+  assert.equal(h.screen.cursorLabel.textContent, 'AI');
+  assert.equal(h.screen.socket.messages.length, 0);
+});
+
+test('cursor ignores malformed/stale packets and waits for matching image dimensions', () => {
+  const h = harness();
+  h.screen.socket.onmessage({data:'not-json'});
+  const packet = {type:'cursor',seq:5,kind:'click',x:10,y:20,width:1000,height:500,actor:'ai'};
+  h.screen.receiveCursor(packet);
+  assert.equal(h.screen.cursor.hidden, true);
+  h.image.naturalWidth = 1000; h.image.naturalHeight = 500; h.image.onload();
+  assert.equal(h.screen.cursor.hidden, false);
+  h.screen.receiveCursor({...packet,seq:4,x:500});
+  assert.equal(h.screen.cursorState.x, 10);
+  h.screen.receiveCursor({...packet,seq:6,x:1000});
+  assert.equal(h.screen.cursorState.seq, 5);
+  h.screen.socket.onclose();
+  assert.equal(h.screen.cursor.hidden, true);
+  assert.equal(h.screen.animations.size, 0);
 });

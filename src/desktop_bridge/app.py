@@ -87,6 +87,52 @@ class Runtime:
         self.browser = browser
         self.coding = coding
         self.ready = False
+        self.pointer_subscribers = set()
+        self.pointer_position = None
+        self.pointer_sequence = 0
+        self.pointer_pressed = None
+
+    def publish_pointer(self, event, epoch, actor):
+        # Only coordinates and pointer state cross this channel; never keys/text.
+        if epoch != self.session.epoch:
+            return
+        self.pointer_sequence += 1
+        if event["kind"] == "down":
+            self.pointer_pressed = event.get("button")
+        elif event["kind"] in {"up", "click"}:
+            self.pointer_pressed = None
+        width, height = getattr(self.desktop, "size", None) or (1280, 800)
+        packet = {"type": "cursor", "seq": self.pointer_sequence,
+                  "kind": event["kind"], "x": event["x"], "y": event["y"],
+                  "button": event.get("button"), "pressed": self.pointer_pressed, "actor": actor,
+                  "width": width, "height": height}
+        self.pointer_position = {**packet, "kind": "move", "button": None}
+        for queue in self.pointer_subscribers:
+            if queue.full():
+                queue.get_nowait()
+            queue.put_nowait(packet)
+
+    async def perform_desktop(self, action):
+        epoch = self.session.epoch
+        actor = "ai" if self.session.mode == "agent" else "human"
+        if getattr(self.desktop, "pointer_events", False):
+            loop = asyncio.get_running_loop()
+            previous = self.desktop.on_pointer
+            self.desktop.on_pointer = lambda event: loop.call_soon_threadsafe(
+                self.publish_pointer, event, epoch, actor)
+            try:
+                result = await self.desktop.perform(action)
+                # Drain callbacks queued by the input thread before the action advances epoch.
+                await asyncio.sleep(0)
+                return result
+            finally:
+                self.desktop.on_pointer = previous
+        result = await self.desktop.perform(action)
+        if action["kind"] in {"move", "click", "scroll", "drag"}:
+            x, y = action["path"][-1] if action["kind"] == "drag" else (action["x"], action["y"])
+            self.publish_pointer({"kind": "up" if action["kind"] == "drag" else action["kind"],
+                                  "x": x, "y": y, "button": action.get("button")}, epoch, actor)
+        return result
 
     async def start(self):
         if self.desktop is None:
@@ -124,6 +170,8 @@ class Runtime:
         self.session.close()
 
     async def control(self, mode):
+        self.pointer_position = None
+        self.pointer_pressed = None
         self.session.control_pending = True
         try:
             await self.session.transition(mode)
@@ -404,7 +452,7 @@ class Runtime:
                         payload, observation=ticket["observation"], guard=guard
                     )
                 else:
-                    operation = self.desktop.perform(payload)
+                    operation = self.perform_desktop(payload)
                 ticket["result"] = await drain_on_cancel(operation)
                 return text_result(ticket["result"])
         if name.startswith("coding_"):
@@ -900,6 +948,13 @@ def create_app(
         writer = None
         try:
             if getattr(runtime.desktop, "transport", "vnc") == "native":
+                send_lock = asyncio.Lock()
+                first_frame = asyncio.Event()
+                pointer_queue = asyncio.Queue(maxsize=64)
+                runtime.pointer_subscribers.add(pointer_queue)
+                if runtime.pointer_position:
+                    pointer_queue.put_nowait(runtime.pointer_position)
+
                 def can_control():
                     return (authorized() and mode == "control" and session.epoch == epoch
                             and session.mode in {"human", "private"}
@@ -915,7 +970,7 @@ def create_app(
                         async with session.lock:
                             if not can_control():
                                 return
-                            await drain_on_cancel(runtime.desktop.perform(action))
+                            await drain_on_cancel(runtime.perform_desktop(action))
                             session.last_activity = time.monotonic()
 
                 async def native_frames():
@@ -929,13 +984,31 @@ def create_app(
                             frame = await drain_on_cancel(runtime.desktop.screenshot())
                             if not authorized() or frame_epoch != session.epoch:
                                 return
-                            await websocket.send_bytes(frame)
+                            async with send_lock:
+                                if not authorized() or frame_epoch != session.epoch:
+                                    return
+                                await websocket.send_bytes(frame)
+                            first_frame.set()
                         await asyncio.sleep(.5)
 
-                tasks = [asyncio.create_task(native_input()), asyncio.create_task(native_frames())]
+                async def native_pointer():
+                    await first_frame.wait()
+                    while authorized():
+                        try:
+                            packet = await asyncio.wait_for(pointer_queue.get(), timeout=.5)
+                        except TimeoutError:
+                            continue
+                        async with send_lock:
+                            if not authorized() or (mode == "control" and not can_control()):
+                                return
+                            await websocket.send_json(packet)
+
+                tasks = [asyncio.create_task(native_input()), asyncio.create_task(native_frames()),
+                         asyncio.create_task(native_pointer())]
                 try:
                     await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                 finally:
+                    runtime.pointer_subscribers.discard(pointer_queue)
                     for task in tasks:
                         task.cancel()
                     with anyio.CancelScope(shield=True):

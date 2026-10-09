@@ -25,6 +25,12 @@ Windows 现在提供 `desktop_snapshot`：通过系统 UI Automation 读取当�
 
 owner viewer 支持鼠标、拖动、滚轮、键盘和粘贴；OAuth viewer 始终只读，服务器不会执行其输入。private takeover、撤权、授权过期会关闭相关 viewer。PNG 截图流约每 0.5 秒更新。
 
+原生 viewer 自动显示虚拟光标：紫色箭头和 AI 标记显示 AI 的桌面指针位置，按下时显示点击波纹，右键采用蓝色波纹，滚动采用黄色波纹，按住拖动时显示 Drag。owner 接管后的操作标为 You。光标遵循画面缩放、居中留白和全屏尺寸，断线或接管导致原观看连接结束时清理叠加层；开启“减少动态效果”时减少动画。
+
+Windows 光标事件来自成功的 SetCursorPos/SendInput；拖动中的每个原生移动步骤都会通知 viewer，通过同一 WebSocket 的小型 JSON 消息独立发送，不等待下一张 PNG。事件只包含坐标、按钮状态、显示尺寸和操作者，不传输键盘按键或输入文本。波纹表示鼠标输入已发送，具体操作结果仍需观察应用。用户侧叠加层不会写入 desktop_screenshot 或 desktop_snapshot，也不改变点击坐标或 OAuth viewer 的只读权限。
+
+更新服务并刷新 viewer 即可启用，无需额外调用 MCP 工具。此叠加层用于原生 PNG viewer；VNC/noVNC 路径保持其现有光标行为。macOS 原生后端目前反馈动作完成后的指针终点，Windows 提供拖动过程中的连续位置。browser_action 使用浏览器结构操作，不产生桌面鼠标遥测。
+
 Windows 上个人上下文使用 Win32 文件句柄和文件锁，拒绝 symlink / junction 等 reparse point，持有目录句柄期间禁止其重命名，并在同目录原子替换 JSON。Windows 使用继承的 NTFS ACL，POSIX 权限位仅在 Linux/macOS 检查。文件引用拒绝盘符、路径穿越和 alternate data stream。
 
 可选 MCP 插件配置在 Windows 上检查实际 NTFS DACL；写权限只允许当前用户、文件所有者、SYSTEM 和 Administrators，拒绝其他主体的写入授权。配置仍需放在模型 workspace 外部。

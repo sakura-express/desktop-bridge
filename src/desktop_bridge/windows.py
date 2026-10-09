@@ -50,9 +50,23 @@ KEYS.update(ctrl=17, control=17, shift=16, alt=18, win=91, meta=91,
 EXTENDED = {33, 34, 35, 36, 37, 38, 39, 40, 45, 46, 91}
 
 
+def snapshot_stage(stderr):
+    """Expose only known stage labels, never provider output or UI content."""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    stages = {"load_assemblies", "compile_dpi_helper", "read_foreground_root",
+              "cache_root_properties", "walk_controls", "serialize_result"}
+    stage = "start_powershell"
+    for line in (stderr or "").splitlines():
+        if line.startswith("uia:") and line[4:] in stages:
+            stage = line[4:]
+    return stage
+
+
 class WindowsDesktop:
     transport = "native"
     platform = "windows"
+    pointer_events = True
 
     def __init__(self):
         if sys.platform != "win32":
@@ -79,6 +93,8 @@ class WindowsDesktop:
         # its thread context so capture and input use the same physical pixels.
         self.user.SetProcessDpiAwarenessContext(C.c_void_p(-4))
         self.size = None
+        self.on_pointer = None
+        self._cursor_point = None
         self._geometry()
 
     def _geometry(self):
@@ -141,7 +157,10 @@ class WindowsDesktop:
             value = json.loads(result.stdout.decode("utf-8-sig"))
             if not value.get("elements"):
                 raise ValueError("No accessible controls")
-        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        except subprocess.TimeoutExpired as error:
+            raise BridgeError("UIA_TIMEOUT", "Structured observation timed out after 6s at "
+                              f"{snapshot_stage(error.stderr)}; use desktop_screenshot") from error
+        except (OSError, ValueError) as error:
             raise BridgeError("DESKTOP_ERROR", "Structured observation unavailable; "
                               "use desktop_screenshot") from error
         if hwnd != self.user.GetForegroundWindow() or size != self._geometry():
@@ -171,10 +190,26 @@ class WindowsDesktop:
 
     def _mouse(self, flags, data=0):
         self._send(Input(type=0, mi=MouseInput(mouseData=data & 0xFFFFFFFF, dwFlags=flags)))
+        buttons = {2: ("down", "left"), 4: ("up", "left"),
+                   8: ("down", "right"), 16: ("up", "right"),
+                   32: ("down", "middle"), 64: ("up", "middle")}
+        if flags in buttons:
+            kind, button = buttons[flags]
+            self._pointer(kind, button=button)
+        elif flags in {0x0800, 0x1000}:
+            self._pointer("scroll")
+
+    def _pointer(self, kind, *, button=None):
+        callback = getattr(self, "on_pointer", None)
+        point = getattr(self, "_cursor_point", None)
+        if callback and point is not None:
+            callback({"kind": kind, "x": point[0], "y": point[1], "button": button})
 
     def _move(self, point):
         if not self.user.SetCursorPos(*point):
             raise BridgeError("DESKTOP_ERROR", "Windows cursor movement failed")
+        self._cursor_point = point
+        self._pointer("move")
 
     def _key_event(self, code, up=False, *, unicode=False):
         flags = (2 if up else 0) | (4 if unicode else (1 if code in EXTENDED else 0))

@@ -1,6 +1,8 @@
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::Error.WriteLine('uia:load_assemblies')
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, WindowsBase
+[Console]::Error.WriteLine('uia:compile_dpi_helper')
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
@@ -9,6 +11,7 @@ public static class SnapshotDpi {
 }
 '@
 [void][SnapshotDpi]::SetThreadDpiAwarenessContext([IntPtr](-4))
+[Console]::Error.WriteLine('uia:read_foreground_root')
 $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr](__HWND__))
 $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
 # Cache properties in the same provider request rather than one cross-process call per property.
@@ -16,6 +19,7 @@ $cache = [System.Windows.Automation.CacheRequest]::new()
 foreach ($property in @('Name', 'ControlType', 'BoundingRectangle', 'IsOffscreen', 'IsEnabled', 'HasKeyboardFocus', 'IsPassword')) {
     $cache.Add([System.Windows.Automation.AutomationElement]::("${property}Property"))
 }
+[Console]::Error.WriteLine('uia:cache_root_properties')
 $root = $root.GetUpdatedCache($cache)
 $clock = [System.Diagnostics.Stopwatch]::StartNew()
 $queue = [System.Collections.Generic.Queue[object]]::new()
@@ -23,6 +27,7 @@ $queue.Enqueue(@{node=$root; parent=$null; depth=0})
 $elements = [System.Collections.Generic.List[object]]::new()
 $visited = 0
 $truncated = $false
+[Console]::Error.WriteLine('uia:walk_controls')
 while ($queue.Count -gt 0 -and $visited -lt 500 -and $clock.ElapsedMilliseconds -lt 1500) {
     $entry = $queue.Dequeue()
     $visited++
@@ -47,4 +52,5 @@ while ($queue.Count -gt 0 -and $visited -lt 500 -and $clock.ElapsedMilliseconds 
     } catch { $truncated=$true }
 }
 if ($queue.Count -gt 0) { $truncated=$true }
+[Console]::Error.WriteLine('uia:serialize_result')
 @{source='windows_uia'; elements=@($elements.ToArray()); truncated=$truncated} | ConvertTo-Json -Depth 6 -Compress

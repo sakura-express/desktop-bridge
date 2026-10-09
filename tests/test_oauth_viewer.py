@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import hashlib
+import json
 from urllib.parse import parse_qs, urlsplit
 
 import anyio
@@ -305,8 +306,72 @@ def test_native_owner_control_requires_human_mode_and_revokes_on_transition(nati
         with client.websocket_connect("/desktop/control", headers={"Origin": "http://testserver"}) as ws:
             ws.receive_bytes()
             ws.send_json({"kind": "click", "x": 1500, "y": 1000})
+            cursor = ws.receive_json()
+            assert cursor["type"] == "cursor" and cursor["actor"] == "human"
+            assert (cursor["x"], cursor["y"]) == (1500, 1000)
             ws.receive_bytes()
             assert native_app.state.runtime.desktop.calls == 1
             assert client.post("/api/control/agent", headers=headers).status_code == 200
             with pytest.raises(WebSocketDisconnect):
                 ws.receive_bytes()
+
+
+def test_ai_pointer_stream_does_not_wait_for_action_or_frame_lock(tmp_path):
+    class PointerDesktop(FakeNativeDesktop):
+        pointer_events = True
+        on_pointer = None
+
+        def __init__(self):
+            self.release = asyncio.Event()
+
+        async def perform(self, action):
+            self.on_pointer({"kind": "move", "x": 50, "y": 60})
+            self.on_pointer({"kind": "down", "x": 50, "y": 60, "button": "left"})
+            await self.release.wait()
+            self.on_pointer({"kind": "up", "x": 80, "y": 90, "button": "left"})
+            return {"ok": True}
+
+    backend = PointerDesktop()
+    runtime = Runtime(tmp_path, desktop=backend, browser=FakeBrowser(), coding=FakeCoding())
+    app = create_app(tmp_path, TOKEN, "http://testserver", runtime)
+    with TestClient(app) as client:
+        token = oauth(client)
+        assert redeem(client, ticket(client, token)).status_code == 200
+        client.portal.call(runtime.call, "session_start", {})
+        observed = client.portal.call(runtime.call, "desktop_screenshot", {})
+        observation = json.loads(observed[0].text)["observation_id"]
+        with client.websocket_connect("/desktop/oauth/view", headers={"Origin": "http://testserver"}) as ws:
+            ws.receive_bytes()
+            pending = client.portal.start_task_soon(runtime.call, "desktop_action", {
+                "action_id": "streaming-drag", "observation_id": observation,
+                "action": {"kind": "drag", "path": [[50, 60], [80, 90]]}})
+            assert ws.receive_json()["kind"] == "move"
+            down = ws.receive_json()
+            assert down["kind"] == "down" and down["pressed"] == "left"
+            assert down["actor"] == "ai" and down["width"] == 2048
+            assert runtime.session.lock.locked() and not pending.done()
+            client.portal.call(backend.release.set)
+            assert ws.receive_json()["kind"] == "up"
+            pending.result(timeout=5)
+            assert backend.on_pointer is None
+        assert not runtime.pointer_subscribers
+
+
+async def test_cursor_backpressure_retains_latest_position_and_no_text(tmp_path):
+    runtime = Runtime(tmp_path, desktop=FakeNativeDesktop(), browser=FakeBrowser(), coding=FakeCoding())
+    try:
+        queue = asyncio.Queue(maxsize=2)
+        runtime.pointer_subscribers.add(queue)
+        runtime.publish_pointer({"kind": "down", "x": 0, "y": 0, "button": "left"}, 0, "ai")
+        for x in range(10):
+            runtime.publish_pointer({"kind": "move", "x": x, "y": 10, "text": "secret"}, 0, "ai")
+        assert queue.qsize() == 2
+        assert queue.get_nowait()["x"] == 8
+        latest = queue.get_nowait()
+        assert latest["x"] == 9 and latest["pressed"] == "left" and "text" not in latest
+        await runtime.control("private")
+        assert runtime.pointer_position is None and runtime.pointer_pressed is None
+        runtime.publish_pointer({"kind": "move", "x": 20, "y": 30}, 0, "ai")
+        assert queue.empty()
+    finally:
+        runtime.session.close()

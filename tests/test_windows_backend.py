@@ -170,3 +170,31 @@ def test_structured_snapshot_failure_suggests_screenshot(monkeypatch, outcome):
     monkeypatch.setattr("desktop_bridge.windows.subprocess.run", run)
     with pytest.raises(BridgeError, match="use desktop_screenshot"):
         backend._snapshot()
+
+
+def test_snapshot_timeout_reports_stage_without_leaking_provider_text(monkeypatch):
+    backend = desktop()
+    backend.user.GetForegroundWindow.return_value = 123
+    error = subprocess.TimeoutExpired("powershell", 6,
+        stderr=b"uia:load_assemblies\nuia:compile_dpi_helper\nprivate provider text\nuia:unknown")
+    monkeypatch.setattr("desktop_bridge.windows.subprocess.run", Mock(side_effect=error))
+    with pytest.raises(BridgeError) as raised:
+        backend._snapshot()
+    assert raised.value.code == "UIA_TIMEOUT"
+    assert "compile_dpi_helper" in str(raised.value)
+    assert "private" not in str(raised.value)
+
+
+def test_pointer_telemetry_follows_successful_native_input():
+    backend = desktop()
+    packets = []
+    backend.on_pointer = packets.append
+    backend._perform({"kind": "click", "x": 100, "y": 200, "button": "right", "count": 2})
+    assert [event["kind"] for event in packets] == ["move", "down", "up", "down", "up"]
+    assert packets[1] == {"kind": "down", "x": 100, "y": 200, "button": "right"}
+    backend._perform({"kind": "type", "text": "not in telemetry"})
+    assert len(packets) == 5
+    backend.user.SetCursorPos.return_value = 0
+    with pytest.raises(BridgeError):
+        backend._move((300, 400))
+    assert len(packets) == 5
