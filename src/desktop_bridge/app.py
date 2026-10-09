@@ -174,11 +174,18 @@ class Runtime:
             ),
             tool(
                 "desktop_screenshot",
-                "Observe the SAME desktop as the human viewer. Returns image and observation_id. Hidden in private takeover.",
+                "Observe the SAME desktop as the human viewer. Returns image and observation_id. "
+                "Prefer desktop_snapshot when available for native Windows controls; use images for "
+                "missing controls or visual content. Hidden in private takeover.",
             ),
             tool(
                 "desktop_action",
-                "Desktop action. Coordinates use full screenshot pixels; scroll uses wheel ticks, positive dy down. macOS shortcuts use cmd; Windows shortcuts use ctrl or win. Fresh observation and unique action_id required.",
+                "Desktop action. First observe using desktop_snapshot (when available) or desktop_screenshot. "
+                "Prefer existing navigation controls, e.g. Downloads/下载 in File Explorer, over searching for a folder name. "
+                "Coordinates use physical screen pixels; structured bounds are [x,y,width,height], click the center. "
+                "scroll uses wheel ticks, positive dy down. macOS shortcuts use cmd; Windows shortcuts use ctrl or win. "
+                "Fresh observation and unique action_id required. Input success is not task success: "
+                "after each action, take a fresh snapshot to verify the change and get the next observation_id.",
                 {
                     "action": DesktopAction.model_json_schema(),
                     "observation_id": {"type": "string"},
@@ -211,6 +218,16 @@ class Runtime:
                 "List ordinary files in persistent workspace; no file contents are logged.",
             ),
         ]
+        if callable(getattr(self.desktop, "snapshot", None)):
+            tools.append(tool(
+                "desktop_snapshot",
+                "Fast text-only observation of the foreground Windows window via UI Automation: "
+                "control names, roles, hierarchy, enabled/focused state and physical-pixel bounds, "
+                "plus observation_id. Use first for native apps and after desktop_action; no image is captured. "
+                "Use existing folder/sidebar controls before search; Downloads/Download/下载 may name the downloads folder. "
+                "If the relevant control is missing or truncated, use desktop_screenshot. "
+                "Only the foreground window is included. Hidden in private takeover.",
+            ))
         tools.extend([
             tool(
                 "personal_context",
@@ -283,6 +300,19 @@ class Runtime:
             if session.mode in {"human", "private"}:
                 raise BridgeError("CONTROL_NOT_OWNED", "Cannot change human takeover state")
             return text_result(await self.control("stopped"))
+        if name == "desktop_snapshot":
+            if not callable(getattr(self.desktop, "snapshot", None)):
+                raise BridgeError("UNKNOWN_TOOL", "This desktop does not support structured snapshots")
+            async with session.lock:
+                if session.mode == "private":
+                    raise BridgeError("PRIVATE_TAKEOVER", "Observation paused")
+                epoch = session.epoch
+                value = await self.desktop.snapshot()
+                if epoch != session.epoch:
+                    raise BridgeError("STALE_OBSERVATION", "Control changed while observing; retry")
+                return text_result({**value, "observation_id": session.observe(),
+                                    "timestamp": time.time(), "session_id": session.id,
+                                    "width": self.desktop.size[0], "height": self.desktop.size[1]})
         if name in {"desktop_screenshot", "browser_snapshot"}:
             async with session.lock:
                 if session.mode == "private":

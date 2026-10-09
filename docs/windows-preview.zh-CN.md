@@ -13,6 +13,14 @@
 
 ## 桌面与文件
 
+Windows 现在提供 `desktop_snapshot`：通过系统 UI Automation 读取当前前台窗口，返回控件名称、角色、父子关系、可用/焦点状态与 `[x,y,width,height]` 物理像素边界，以及新的 `observation_id`。此工具只返回文本，不生成 PNG，也不调用 Chromium CDP。脚本使用系统 Windows PowerShell/.NET，无需额外安装依赖。
+
+原生应用的推荐操作顺序为 `desktop_snapshot → desktop_action → desktop_snapshot`。例如打开下载目录时，先寻找文件管理器侧栏的“下载/Downloads/Download”，使用对应控件的边界中心点击，再读取目录列表验证；不要把目录名直接当成搜索词。每个动作都会使旧观察失效，需要新 `observation_id` 和新的 `action_id`。`input_submitted` 只表示输入发送成功，不能当成软件已打开的证据。
+
+快照只覆盖前台窗口，ID 只用于说明本次树结构；动作仍使用坐标，不支持通过 ID 调用控件。读取采用属性缓存，限制遍历时间、节点数和深度，超限返回 `truncated: true`。控件缺失、自绘界面、读取失败或需要视觉信息时使用 `desktop_screenshot`。焦点窗口或屏幕几何在读取期间改变会使快照失败，避免返回错配的坐标。读取进程最长 6 秒后终止；耗时字段 `elapsed_ms` 方便实测。
+
+更新服务后，在 NekoCode 中重新连接该 MCP 并开启新会话，使模型拿到新增工具。工具操作策略直接写入工具描述；当前 NekoCode MCP 接入不会把服务器初始化返回的 `instructions` 自动加入模型提示词。人类 viewer 的 PNG 实时画面仍会独立生成，结构化观察替换的是 AI 的观察链路。
+
 截图使用 Pillow ImageGrab，输入使用 Win32 `SendInput` / `SetCursorPos`。服务和工作线程使用 Per Monitor V2 DPI 上下文，坐标直接对应截图物理像素；屏幕几何改变后需要重新截图。`dy` 正数向下，滚轮单位为 wheel tick。Windows 组合键使用 `ctrl`、`alt`、`shift`、`win`，如 `["ctrl", "a"]`。中文与 emoji 输入使用 UTF-16 Unicode 键盘事件。
 
 owner viewer 支持鼠标、拖动、滚轮、键盘和粘贴；OAuth viewer 始终只读，服务器不会执行其输入。private takeover、撤权、授权过期会关闭相关 viewer。PNG 截图流约每 0.5 秒更新。

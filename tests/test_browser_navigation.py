@@ -83,12 +83,16 @@ async def test_browser_perform_and_snapshot_simulation():
             self.url = url
             self.status = status
             self.closed = False
+            self.foreground = False
+        async def bring_to_front(self):
+            self.foreground = True
         def locator(self, sel):
             return FakeLocator()
         async def title(self):
             return "Page Title"
         # Test double mimicking Playwright Page.goto timeout parameter
         async def goto(self, url, wait_until=None, timeout=None):  # noqa: ASYNC109
+            assert self.foreground, 'Navigation must reveal Chrome on the native desktop'
             if "timeout" in url:
                 raise TimeoutError("Simulated timeout")
             if "fail" in url:

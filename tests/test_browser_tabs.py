@@ -279,6 +279,45 @@ async def test_new_tab_preserves_old_page_and_navigate_uses_current_tab(browser)
     assert first.url == old_url
 
 
+async def test_navigation_reveals_selected_tab_without_changing_other_tabs(browser):
+    first, second = browser.browser.contexts[0].pages
+    await perform(browser, {"kind": "navigate", "url": "https://example.test/visible"})
+    assert first.effects == [("bring_to_front",), ("goto", "https://example.test/visible")]
+    assert second.effects == []
+
+
+async def test_navigation_rechecks_control_after_foreground_activation(browser):
+    state = await browser.tab_state()
+    first = browser._tabs['tab-1']
+    checks = 0
+
+    def guard():
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            raise BridgeError('CONTROL_NOT_OWNED', 'Control revoked during activation')
+
+    with pytest.raises(BridgeError, match='Control revoked during activation'):
+        await browser.perform({"kind": "navigate", "url": "https://example.test/blocked"},
+                              observation=observed(state), guard=guard)
+    assert first.effects == [("bring_to_front",)]
+
+
+async def test_navigation_rechecks_tab_after_foreground_activation(browser):
+    state = await browser.tab_state()
+    first, second = browser.browser.contexts[0].pages
+
+    async def switch_during_activation():
+        first.effects.append(("bring_to_front",))
+        first.context.activate(second)
+
+    first.bring_to_front = switch_during_activation
+    with pytest.raises(BridgeError) as error:
+        await perform(browser, {"kind": "navigate", "url": "https://example.test/blocked"}, state)
+    assert error.value.code == 'STALE_OBSERVATION'
+    assert first.effects == [("bring_to_front",)] and second.effects == []
+
+
 async def test_new_tab_ambiguous_across_contexts_does_not_choose_one(browser):
     browser.browser.contexts.append(Context())
     browser.browser.contexts[0].pages[0].focused = False

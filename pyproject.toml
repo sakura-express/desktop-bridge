@@ -25,7 +25,7 @@ desktop-bridge = "desktop_bridge.app:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 [tool.setuptools.package-data]
-desktop_bridge = ["static/*"]
+desktop_bridge = ["static/*", "*.ps1"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

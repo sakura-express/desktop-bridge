@@ -142,7 +142,7 @@ class Session:
                 ):
                     raise BridgeError(
                         "STALE_OBSERVATION",
-                        "Observation is stale (TTL 30s or invalidated by prior action/epoch change). Recovery: call browser_snapshot or desktop_screenshot for a fresh observation_id before acting.",
+                        "Observation is stale (TTL 30s or invalidated by prior action/epoch change). Recovery: call browser_snapshot, desktop_snapshot (when available) or desktop_screenshot for a fresh observation_id before acting.",
                     )
             self.db.execute(
                 "INSERT INTO receipts VALUES (?,?, 'running',NULL,?)",

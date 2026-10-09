@@ -1,4 +1,6 @@
 import ctypes
+import json
+import subprocess
 from unittest.mock import Mock
 
 import pytest
@@ -126,3 +128,45 @@ def test_secure_or_multiple_desktops_are_rejected(name, monitors):
     with pytest.raises(BridgeError):
         backend._geometry()
     backend.user.CloseDesktop.assert_called_once_with(42)
+
+
+def test_structured_snapshot_never_captures_pixels(monkeypatch):
+    backend = desktop()
+    backend.user.GetForegroundWindow.return_value = 123
+    backend._capture = Mock(side_effect=AssertionError("snapshot must not capture pixels"))
+    value = {"source": "windows_uia", "elements": [
+        {"name": "下载", "role": "TreeItem", "bounds": [10, 20, 80, 30]}],
+        "truncated": False}
+    run = Mock(return_value=subprocess.CompletedProcess([], 0, json.dumps(value).encode(), b""))
+    monkeypatch.setattr("desktop_bridge.windows.subprocess.run", run)
+    result = backend._snapshot()
+    assert result["elements"][0]["name"] == "下载"
+    assert result["coordinate_space"] == "physical_screen_pixels"
+    assert result["scope"] == "foreground_window"
+    assert run.call_args.kwargs["timeout"] == 6
+    assert run.call_args.kwargs["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    backend._capture.assert_not_called()
+
+
+def test_structured_snapshot_rejects_foreground_switch(monkeypatch):
+    backend = desktop()
+    backend.user.GetForegroundWindow.side_effect = [123, 456]
+    monkeypatch.setattr("desktop_bridge.windows.subprocess.run", Mock(return_value=
+        subprocess.CompletedProcess([], 0, b'{"elements":[{"name":"Downloads"}]}', b"")))
+    with pytest.raises(BridgeError, match="Foreground window"):
+        backend._snapshot()
+
+
+@pytest.mark.parametrize("outcome", [
+    subprocess.CompletedProcess([], 1, b"", b"provider error"),
+    subprocess.CompletedProcess([], 0, b'{"elements":[]}', b""),
+    subprocess.CompletedProcess([], 0, b"invalid json", b""),
+    subprocess.TimeoutExpired("powershell", 6),
+])
+def test_structured_snapshot_failure_suggests_screenshot(monkeypatch, outcome):
+    backend = desktop()
+    backend.user.GetForegroundWindow.return_value = 123
+    run = Mock(side_effect=outcome) if isinstance(outcome, Exception) else Mock(return_value=outcome)
+    monkeypatch.setattr("desktop_bridge.windows.subprocess.run", run)
+    with pytest.raises(BridgeError, match="use desktop_screenshot"):
+        backend._snapshot()

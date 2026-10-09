@@ -329,6 +329,11 @@ class Browser:
             page = await self.page(observation.browser_tab_id)
             if kind == "navigate":
                 guard()
+                # A selected browser tab can still sit behind another native
+                # application. Navigation must also show it on the shared desktop.
+                await page.bring_to_front()
+                await self.page(observation.browser_tab_id)
+                guard()
                 try:
                     response = await page.goto(requested_url, wait_until="domcontentloaded", timeout=20000)
                 except asyncio.CancelledError:
